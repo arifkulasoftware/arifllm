@@ -188,6 +188,9 @@ def main():
         log_file=log_file,
         checkpoint_file=checkpoint_path,
     )
+
+    print("iterator",iterator)
+
     build_and_save_tokenizer(iterator, out_path, vocab_size=args.vocab_size, min_frequency=args.min_frequency, log_file=log_file)
     log_line(log_file, f"Tokenizer saved to: {out_path}")
     log_file.close()
