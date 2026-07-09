@@ -9,7 +9,7 @@ inside the given output directory (defaults to this script's folder).
 Requirements: tokenizers (huggingface)
 
 Usage example:
-  python build_tokenizer.py --vocab-size 65535 --min-frequency 100 --lowercase --input-dir "H:/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
+  python build_tokenizer.py --vocab-size 65535 --min-frequency 5 --lowercase --input-dir "H:/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
 
 note : 
 1) vocab_size az da verilse çokta verilse tüm veriler kullanıldığında, min-frequency 10000 ve üstü için token oluşmadı
