@@ -1,3 +1,6 @@
+tokenizer_checkpoint.txt
+tokenizer_training.log
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
