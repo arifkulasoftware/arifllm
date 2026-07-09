@@ -9,7 +9,12 @@ inside the given output directory (defaults to this script's folder).
 Requirements: tokenizers (huggingface)
 
 Usage example:
-  python build_tokenizer.py --vocab-size 65535 --min-frequency 1000 --lowercase --input-dir "H:/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
+  python build_tokenizer.py --vocab-size 65535 --min-frequency 100 --lowercase --input-dir "H:/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
+
+note : 
+1) vocab_size az da verilse çokta verilse tüm veriler kullanıldığında, min-frequency 10000 ve üstü için token oluşmadı
+2) data mC4 hariç --vocab-size 65535 --min-frequency 100 --lowercase --input-dir "H:/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
+
 """
 import argparse
 import os
@@ -19,7 +24,11 @@ import traceback
 from pathlib import Path
 
 os.environ.setdefault("TQDM_DISABLE", "1")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+#os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+os.environ["OMP_NUM_THREADS"] = "18"
+os.environ["MKL_NUM_THREADS"] = "18"
+os.environ["OPENBLAS_NUM_THREADS"] = "18"
 
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, normalizers
 
