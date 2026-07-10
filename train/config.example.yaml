@@ -1,0 +1,32 @@
+# LLM Model Eğitim Konfigürasyon Dosyası
+# Bu dosyayı train.py'ye şu şekilde geçin: python train.py --config config.yaml
+
+# Tokenizer ve veri dizinleri (zorunlu - config veya komut satırında belirtilmeli)
+tokenizer_path: ../tokenleştirme/kendi_tokenizerim.json
+data_dir: ./data
+
+# Veri parametreleri
+data:
+  pattern: "veriseti*.bin"
+
+# Model mimarisi parametreleri
+model:
+  embedding_dim: 512
+  num_layers: 6
+  num_heads: 8
+  ff_dim: 2048
+  context_length: 512
+  dropout: 0.1
+
+# Eğitim parametreleri
+training:
+  epochs: 20
+  batch_size: 64
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  device: cuda
+
+# Checkpoint ve model kayıt parametreleri
+checkpoint:
+  save_every: 5
+  model_output_path: ./models/model.pt
