@@ -15,11 +15,11 @@
 
 # Tokenizer ve veri dizinleri
 tokenizer_path: ../tokenleştirme/kendi_tokenizerim.json
-data_dir: ./data
+data_dir: H:/data/out
 
 # Veri parametreleri
 data:
-  pattern: "veriseti*.bin"
+  pattern: "veriseti0001.bin"
 
 # Model mimarisi parametreleri (6M parametre hedefi)
 model:
@@ -48,6 +48,9 @@ model:
   # Dropout oranı: 0.2
   # Overfitting'i azaltmak için standarttan biraz daha yüksek
   dropout: 0.2
+
+  # Ağırlık paylaşımı (Weight Tying)
+  tie_weights: true
 
 # Eğitim parametreleri (RTX 4060 8GB için)
 training:

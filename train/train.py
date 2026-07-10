@@ -70,39 +70,36 @@ class BinaryTokenDataset(IterableDataset):
             )
         print(f"Bulunan {len(self.bin_files)} binary dosya")
 
-    def load_tokens_from_file(self, file_path: Path) -> list:
+    def load_tokens_from_file(self, file_path: Path):
         """Binary dosyadan token ID'lerini yükle"""
-        tokens = []
         try:
-            with open(file_path, "rb") as f:
-                while True:
-                    chunk = f.read(2)  # 2 bytes = uint16
-                    if not chunk:
-                        break
-                    token_id = struct.unpack("<H", chunk)[0]
-                    tokens.append(token_id)
+            import numpy as np
+            return np.fromfile(file_path, dtype=np.uint16)
         except Exception as e:
             print(f"Hata: {file_path} okunurken: {e}")
-            return []
-        return tokens
+            import numpy as np
+            return np.array([], dtype=np.uint16)
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """
         Tüm token'ları belleğe yükle ve context_length boyutunda
         öğrenme örnekleri oluştur.
         """
-        all_tokens = []
+        import numpy as np
+        all_tokens_list = []
 
         # Tüm binary dosyaları yükle
         for bin_file in self.bin_files:
             print(f"Yükleniyor: {bin_file.name}")
             tokens = self.load_tokens_from_file(bin_file)
-            all_tokens.extend(tokens)
+            if len(tokens) > 0:
+                all_tokens_list.append(tokens)
 
-        if not all_tokens:
+        if not all_tokens_list:
             print("Uyarı: Token bulunamadı!")
             return
 
+        all_tokens = np.concatenate(all_tokens_list)
         print(f"Toplam {len(all_tokens):,} token yüklendi")
 
         # context_length boyutunda öğrenme örnekleri oluştur
@@ -120,7 +117,7 @@ class BinaryTokenDataset(IterableDataset):
 
             # Eğer vocab_size belirtildiyse, kontrolü yap
             if self.vocab_size is not None:
-                if any(t >= self.vocab_size for t in input_tokens):
+                if (input_tokens >= self.vocab_size).any():
                     continue
                 if target_token >= self.vocab_size:
                     continue
@@ -143,6 +140,7 @@ class SimpleTransformer(nn.Module):
         ff_dim: int = 1024,
         context_length: int = 512,
         dropout: float = 0.1,
+        tie_weights: bool = True,
     ):
         super().__init__()
         self.embedding_dim = embedding_dim
@@ -165,6 +163,10 @@ class SimpleTransformer(nn.Module):
         # Çıkış katmanı
         self.output_head = nn.Linear(embedding_dim, vocab_size)
         self.dropout = nn.Dropout(dropout)
+
+        # Ağırlık paylaşımı (Weight Tying)
+        if tie_weights:
+            self.output_head.weight = self.token_embedding.weight
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -237,7 +239,7 @@ def load_config(config_path: Path) -> Dict[str, Any]:
 
 def merge_config_and_args(config: Dict[str, Any], args: argparse.Namespace) -> argparse.Namespace:
     """
-    Config dosyasından parametreleri yükle ve komut satırı parametreleriyle merge et.
+    Config dosyasından parametreleri yükle ve merge et.
     Komut satırı parametreleri config dosyasını override eder.
     
     Args:
@@ -247,7 +249,6 @@ def merge_config_and_args(config: Dict[str, Any], args: argparse.Namespace) -> a
     Returns:
         Merge edilmiş argümanlar
     """
-    # Config'den parametreleri oku
     if "tokenizer_path" in config:
         if not hasattr(args, "tokenizer_path") or args.tokenizer_path is None:
             args.tokenizer_path = config["tokenizer_path"]
@@ -256,75 +257,68 @@ def merge_config_and_args(config: Dict[str, Any], args: argparse.Namespace) -> a
         if not hasattr(args, "data_dir") or args.data_dir is None:
             args.data_dir = config["data_dir"]
     
-    if "model_output_path" in config and hasattr(config.get("checkpoint", {}), "model_output_path"):
-        if not hasattr(args, "model_output_path") or args.model_output_path is None:
-            args.model_output_path = config["checkpoint"]["model_output_path"]
-    
     # Data parametreleri
     if "data" in config:
         data_config = config["data"]
         if "pattern" in data_config:
-            if not hasattr(args, "data_pattern") or args.data_pattern == "veriseti*.bin":
+            if not hasattr(args, "data_pattern") or args.data_pattern is None:
                 args.data_pattern = data_config["pattern"]
     
     # Model parametreleri
     if "model" in config:
         model_config = config["model"]
         if "embedding_dim" in model_config:
-            if not hasattr(args, "embedding_dim") or args.embedding_dim == 256:
+            if not hasattr(args, "embedding_dim") or args.embedding_dim is None:
                 args.embedding_dim = model_config["embedding_dim"]
         if "num_layers" in model_config:
-            if not hasattr(args, "num_layers") or args.num_layers == 4:
+            if not hasattr(args, "num_layers") or args.num_layers is None:
                 args.num_layers = model_config["num_layers"]
         if "num_heads" in model_config:
-            if not hasattr(args, "num_heads") or args.num_heads == 8:
+            if not hasattr(args, "num_heads") or args.num_heads is None:
                 args.num_heads = model_config["num_heads"]
         if "ff_dim" in model_config:
-            if not hasattr(args, "ff_dim") or args.ff_dim == 1024:
+            if not hasattr(args, "ff_dim") or args.ff_dim is None:
                 args.ff_dim = model_config["ff_dim"]
         if "context_length" in model_config:
-            if not hasattr(args, "context_length") or args.context_length == 512:
+            if not hasattr(args, "context_length") or args.context_length is None:
                 args.context_length = model_config["context_length"]
         if "dropout" in model_config:
-            if not hasattr(args, "dropout") or args.dropout == 0.1:
+            if not hasattr(args, "dropout") or args.dropout is None:
                 args.dropout = model_config["dropout"]
+        if "tie_weights" in model_config:
+            if not hasattr(args, "tie_weights") or args.tie_weights is None:
+                args.tie_weights = model_config["tie_weights"]
     
     # Eğitim parametreleri
     if "training" in config:
         training_config = config["training"]
         if "epochs" in training_config:
-            if not hasattr(args, "epochs") or args.epochs == 10:
+            if not hasattr(args, "epochs") or args.epochs is None:
                 args.epochs = training_config["epochs"]
         if "batch_size" in training_config:
-            if not hasattr(args, "batch_size") or args.batch_size == 32:
+            if not hasattr(args, "batch_size") or args.batch_size is None:
                 args.batch_size = training_config["batch_size"]
         if "learning_rate" in training_config:
-            if not hasattr(args, "learning_rate") or args.learning_rate == 0.0001:
+            if not hasattr(args, "learning_rate") or args.learning_rate is None:
                 args.learning_rate = training_config["learning_rate"]
         if "weight_decay" in training_config:
-            if not hasattr(args, "weight_decay") or args.weight_decay == 0.01:
+            if not hasattr(args, "weight_decay") or args.weight_decay is None:
                 args.weight_decay = training_config["weight_decay"]
         if "device" in training_config:
-            if not hasattr(args, "device"):
+            if not hasattr(args, "device") or args.device is None:
                 args.device = training_config["device"]
     
     # Checkpoint parametreleri
     if "checkpoint" in config:
         checkpoint_config = config["checkpoint"]
         if "save_every" in checkpoint_config:
-            if not hasattr(args, "save_checkpoint_every") or args.save_checkpoint_every == 0:
+            if not hasattr(args, "save_checkpoint_every") or args.save_checkpoint_every is None:
                 args.save_checkpoint_every = checkpoint_config["save_every"]
         if "model_output_path" in checkpoint_config:
             if not hasattr(args, "model_output_path") or args.model_output_path is None:
                 args.model_output_path = checkpoint_config["model_output_path"]
     
     return args
-
-
-def get_vocab_size(tokenizer_path: Path) -> int:
-    """Tokenizer'dan vocab boyutunu al"""
-    tokenizer = Tokenizer.from_file(str(tokenizer_path))
-    return tokenizer.get_vocab_size()
 
 
 def train_epoch(
@@ -358,10 +352,6 @@ def train_epoch(
             total_loss += loss.item()
             num_batches += 1
             pbar.set_postfix({"loss": loss.item()})
-
-            # Bellek tasarrufu için
-            if num_batches % 100 == 0:
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     avg_loss = total_loss / max(num_batches, 1)
     return avg_loss
@@ -485,6 +475,12 @@ def main():
         default=None,
         help="Her N epoch sonrası checkpoint kaydet (default: 0)",
     )
+    parser.add_argument(
+        "--tie-weights",
+        type=lambda x: (str(x).lower() in ['true', '1', 'yes']),
+        default=None,
+        help="Embedding ve output head ağırlıklarını paylaş (Weight Tying) (default: True)",
+    )
 
     args = parser.parse_args()
 
@@ -529,6 +525,8 @@ def main():
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
     if args.save_checkpoint_every is None:
         args.save_checkpoint_every = 0
+    if args.tie_weights is None:
+        args.tie_weights = True
 
     # Parametreleri doğrula
     tokenizer_path = Path(args.tokenizer_path).expanduser().resolve()
@@ -576,6 +574,7 @@ def main():
         ff_dim=args.ff_dim,
         context_length=args.context_length,
         dropout=args.dropout,
+        tie_weights=args.tie_weights,
     ).to(device)
 
     # Model parametrelerini yazdır
