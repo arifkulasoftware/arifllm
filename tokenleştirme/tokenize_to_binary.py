@@ -8,20 +8,23 @@ binary files named like veriseti0001.bin, veriseti0002.bin, etc.
 Each output file is limited to at most 256MB of binary data.
 
 Usage:
-    python tokenize_to_binary.py --input-dir "H:/data/all_txt" --output-dir "H:/data/out" --tokenizer-path "kendi_tokenizerim.json"
+    python tokenize_to_binary.py --max-workers 8 --input-dir "F:/My App/ai/data/all_txt" --output-dir "H:/data/out" --tokenizer-path "kendi_tokenizerim.json"
+    tüm data 24 saat 100Gb bellek peek
 """
 import argparse
 import os
+import shutil
 import struct
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from threading import Lock
+from threading import Lock, local
 
 from tokenizers import Tokenizer
 
 MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 TOKEN_SIZE_BYTES = 2
+_WORKER_STATE = local()
 
 
 def find_txt_files(input_dir: Path):
@@ -49,13 +52,15 @@ class ChunkWriter:
         self.handle = self.current_path.open("wb")
         self.bytes_written = 0
 
-    def write_token(self, token_id: int):
-        payload = struct.pack("<H", token_id)
+    def write_bytes(self, payload: bytes):
         with self.lock:
             if self.handle is None or self.bytes_written + len(payload) > self.max_bytes:
                 self._rotate()
             self.handle.write(payload)
             self.bytes_written += len(payload)
+
+    def write_token(self, token_id: int):
+        self.write_bytes(struct.pack("<H", token_id))
 
     def close(self):
         with self.lock:
@@ -64,27 +69,51 @@ class ChunkWriter:
                 self.handle = None
 
 
-def process_text_file(tokenizer: Tokenizer, txt_path: Path, writer: ChunkWriter):
+def init_worker(tokenizer_path: str):
+    _WORKER_STATE.tokenizer = Tokenizer.from_file(tokenizer_path)
+
+
+def process_text_file(txt_path: Path, output_path: Path):
     try:
-        with txt_path.open("r", encoding="utf-8", errors="ignore", buffering=1024 * 1024) as fh:
-            for line in fh:
-                text = line.strip()
-                if not text:
-                    continue
+        tokenizer = getattr(_WORKER_STATE, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError("Tokenizer was not initialized for this worker")
 
-                encoding = tokenizer.encode(text)
-                token_ids = encoding.ids
-                if not token_ids:
-                    continue
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("wb") as out_fh:
+            with txt_path.open("r", encoding="utf-8", errors="ignore", buffering=1024 * 1024) as fh:
+                for line in fh:
+                    text = line.strip()
+                    if not text:
+                        continue
 
-                for token_id in token_ids:
-                    writer.write_token(token_id)
+                    encoding = tokenizer.encode(text)
+                    token_ids = encoding.ids
+                    if not token_ids:
+                        continue
+
+                    for token_id in token_ids:
+                        out_fh.write(struct.pack("<H", token_id))
     except Exception as exc:
         return False, str(txt_path), str(exc)
     return True, str(txt_path), None
 
 
-def tokenize_to_binary(tokenizer: Tokenizer, input_dir: Path, output_dir: Path, prefix: str = "veriseti", max_workers: int = 4):
+def merge_temp_files(temp_dir: Path, output_dir: Path, prefix: str, max_bytes: int = MAX_OUTPUT_BYTES):
+    writer = ChunkWriter(output_dir, prefix, max_bytes)
+    try:
+        for temp_path in sorted(temp_dir.glob("*.bin")):
+            with temp_path.open("rb") as src:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    writer.write_bytes(chunk)
+    finally:
+        writer.close()
+
+
+def tokenize_to_binary(tokenizer_path: str, input_dir: Path, output_dir: Path, prefix: str = "veriseti", max_workers: int = 4):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     txt_files = list(find_txt_files(input_dir))
@@ -92,16 +121,19 @@ def tokenize_to_binary(tokenizer: Tokenizer, input_dir: Path, output_dir: Path, 
         print(f"No .txt files found under {input_dir}")
         return 0
 
-    print(f"Found {len(txt_files)} .txt files. Beginning tokenization with {max_workers} workers...")
+    requested_workers = max_workers or 4
+    effective_workers = max(1, min(requested_workers, len(txt_files), max(2, os.cpu_count() or 4)))
+    print(f"Found {len(txt_files)} .txt files. Beginning tokenization with {effective_workers} workers...")
 
-    writer = ChunkWriter(output_dir, prefix)
+    temp_dir = output_dir / ".tmp_parallel"
+    temp_dir.mkdir(parents=True, exist_ok=True)
     completed = 0
 
     try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=effective_workers, initializer=init_worker, initargs=(tokenizer_path,)) as executor:
             future_map = {
-                executor.submit(process_text_file, tokenizer, txt_path, writer): txt_path
-                for txt_path in txt_files
+                executor.submit(process_text_file, txt_path, temp_dir / f"{idx:04d}_{txt_path.stem}.bin"): txt_path
+                for idx, txt_path in enumerate(txt_files)
             }
 
             for future in as_completed(future_map):
@@ -116,7 +148,9 @@ def tokenize_to_binary(tokenizer: Tokenizer, input_dir: Path, output_dir: Path, 
                 except Exception as exc:
                     print(f"Failed: {txt_path} ({exc})")
     finally:
-        writer.close()
+        if temp_dir.exists():
+            merge_temp_files(temp_dir, output_dir, prefix)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     print(f"Completed. Processed {completed}/{len(txt_files)} file(s). Output directory: {output_dir}")
     return completed
@@ -128,7 +162,7 @@ def main():
     parser.add_argument("--output-dir", required=True, help="Directory where binary files will be written")
     parser.add_argument("--tokenizer-path", default="kendi_tokenizerim.json", help="Path to the tokenizer JSON file")
     parser.add_argument("--prefix", default="veriseti", help="Output file prefix")
-    parser.add_argument("--max-workers", type=int, default=4, help="Number of worker threads for parallel processing")
+    parser.add_argument("--max-workers", type=int, default=4, help="Number of worker threads for parallel processing (keeps memory usage lower than process-based workers)")
     args = parser.parse_args()
 
     tokenizer_path = Path(args.tokenizer_path).expanduser().resolve()
@@ -140,8 +174,7 @@ def main():
     if not input_dir.exists():
         raise SystemExit(f"Input directory not found: {input_dir}")
 
-    tokenizer = Tokenizer.from_file(str(tokenizer_path))
-    tokenize_to_binary(tokenizer, input_dir, output_dir, prefix=args.prefix, max_workers=args.max_workers)
+    tokenize_to_binary(str(tokenizer_path), input_dir, output_dir, prefix=args.prefix, max_workers=args.max_workers)
 
 
 if __name__ == "__main__":
