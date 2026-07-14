@@ -317,6 +317,9 @@ def merge_config_and_args(config: Dict[str, Any], args: argparse.Namespace) -> a
         if "model_output_path" in checkpoint_config:
             if not hasattr(args, "model_output_path") or args.model_output_path is None:
                 args.model_output_path = checkpoint_config["model_output_path"]
+        if "resume" in checkpoint_config:
+            if not hasattr(args, "resume") or args.resume is None:
+                args.resume = checkpoint_config["resume"]
     
     return args
 
@@ -476,6 +479,12 @@ def main():
         help="Her N epoch sonrası checkpoint kaydet (default: 0)",
     )
     parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Eğitime devam etmek için yüklenecek checkpoint (.pt dosyası) yolu (default: None)",
+    )
+    parser.add_argument(
         "--tie-weights",
         type=lambda x: (str(x).lower() in ['true', '1', 'yes']),
         default=None,
@@ -587,15 +596,33 @@ def main():
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     criterion = nn.CrossEntropyLoss()
 
+    # Checkpoint'ten yükleme (Resume)
+    start_epoch = 1
+    best_loss = float("inf")
+    if args.resume:
+        resume_path = Path(args.resume).expanduser().resolve()
+        if resume_path.exists():
+            print(f"Checkpoint yükleniyor: {resume_path}")
+            checkpoint = torch.load(resume_path, map_location=device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            if "optimizer_state_dict" in checkpoint and optimizer is not None:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "epoch" in checkpoint:
+                start_epoch = checkpoint["epoch"] + 1
+            if "loss" in checkpoint:
+                best_loss = checkpoint["loss"]
+            print(f"✓ Checkpoint başarıyla yüklendi. Eğitim epoch {start_epoch} konumundan devam edecek. (Önceki Loss: {best_loss:.4f})")
+        else:
+            print(f"Hata: Belirtilen checkpoint dosyası bulunamadı: {resume_path}")
+            sys.exit(1)
+
     # Eğitim döngüsü
     print(f"\nEğitim başlıyor...")
     print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}, LR: {args.learning_rate}")
     print("-" * 80)
 
-    best_loss = float("inf")
-
     try:
-        for epoch in range(1, args.epochs + 1):
+        for epoch in range(start_epoch, args.epochs + 1):
             avg_loss = train_epoch(
                 model, dataloader, optimizer, criterion, device, epoch
             )

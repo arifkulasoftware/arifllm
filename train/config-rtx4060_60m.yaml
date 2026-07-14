@@ -16,7 +16,7 @@
 
 # Tokenizer ve veri dizinleri
 tokenizer_path: ../tokenleştirme/kendi_tokenizerim.json
-data_dir: H:/data/out
+data_dir: H:/data/data_v2
 
 # Veri parametreleri
 data:

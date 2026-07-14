@@ -8,7 +8,7 @@ binary files named like veriseti0001.bin, veriseti0002.bin, etc.
 Each output file is limited to at most 256MB of binary data.
 
 Usage:
-    python tokenize_to_binary.py --max-workers 8 --input-dir "F:/My App/ai/data/all_txt" --output-dir "H:/data/out" --tokenizer-path "kendi_tokenizerim.json"
+    python tokenize_to_binary.py --max-workers 8 --input-dir "F:/My App/ai/data/all_txt" --output-dir "H:/data/data_v2" --tokenizer-path "kendi_tokenizerim.json"
     tüm data 24 saat 100Gb bellek peek
 """
 import argparse
