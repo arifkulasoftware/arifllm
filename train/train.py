@@ -28,8 +28,11 @@ Kullanım (Sadece komut satırı):
 """
 
 import argparse
+import logging
+import logging.handlers
 import struct
 import sys
+import traceback
 from pathlib import Path
 from typing import Iterator, Tuple, Dict, Any
 
@@ -44,6 +47,51 @@ try:
     import yaml
 except ImportError:
     yaml = None
+
+
+def setup_logger(log_path: Path = None) -> logging.Logger:
+    """
+    Logger'ı yapılandır.
+    
+    Hem konsola hem de (log_path verilmişse) dönen log dosyasına yazar.
+    Log dosyası 10 MB dolduğunda yeni bir dosyaya geçer; 5 yedek tutar.
+    
+    Args:
+        log_path: Log dosyasının yolu. None ise sadece konsola yazar.
+        
+    Returns:
+        Yapılandırılmış logger nesnesi.
+    """
+    logger = logging.getLogger("train")
+    logger.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Konsol handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(fmt)
+    logger.addHandler(console_handler)
+
+    # Dosya handler (isteğe bağlı)
+    if log_path is not None:
+        log_path = Path(log_path).expanduser().resolve()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(fmt)
+        logger.addHandler(file_handler)
+        logger.info(f"Log dosyası: {log_path}")
+
+    return logger
 
 
 class BinaryTokenDataset(IterableDataset):
@@ -70,7 +118,8 @@ class BinaryTokenDataset(IterableDataset):
             raise FileNotFoundError(
                 f"Binary dosya bulunamadı: {self.data_dir}/{data_pattern}"
             )
-        print(f"Bulunan {len(self.bin_files)} binary dosya")
+        logger = logging.getLogger("train")
+        logger.info(f"Bulunan {len(self.bin_files)} binary dosya")
 
     def load_tokens_from_file(self, file_path: Path):
         """Binary dosyadan token ID'lerini yükle"""
@@ -78,7 +127,7 @@ class BinaryTokenDataset(IterableDataset):
             import numpy as np
             return np.fromfile(file_path, dtype=np.uint16)
         except Exception as e:
-            print(f"Hata: {file_path} okunurken: {e}")
+            logging.getLogger("train").error(f"Hata: {file_path} okunurken: {e}")
             import numpy as np
             return np.array([], dtype=np.uint16)
 
@@ -91,22 +140,23 @@ class BinaryTokenDataset(IterableDataset):
         all_tokens_list = []
 
         # Tüm binary dosyaları yükle
+        _log = logging.getLogger("train")
         for bin_file in self.bin_files:
-            print(f"Yükleniyor: {bin_file.name}")
+            _log.info(f"Yükleniyor: {bin_file.name}")
             tokens = self.load_tokens_from_file(bin_file)
             if len(tokens) > 0:
                 all_tokens_list.append(tokens)
 
         if not all_tokens_list:
-            print("Uyarı: Token bulunamadı!")
+            _log.warning("Uyarı: Token bulunamadı!")
             return
 
         all_tokens = np.concatenate(all_tokens_list)
-        print(f"Toplam {len(all_tokens):,} token yüklendi")
+        _log.info(f"Toplam {len(all_tokens):,} token yüklendi")
 
         # context_length boyutunda öğrenme örnekleri oluştur
         num_examples = len(all_tokens) // (self.context_length + 1)
-        print(f"Üretilebilir örnek sayısı: {num_examples:,}")
+        _log.info(f"Üretilebilir örnek sayısı: {num_examples:,}")
 
         for i in range(num_examples):
             start_idx = i * self.context_length
@@ -313,16 +363,20 @@ def merge_config_and_args(config: Dict[str, Any], args: argparse.Namespace) -> a
     # Checkpoint parametreleri
     if "checkpoint" in config:
         checkpoint_config = config["checkpoint"]
-        if "save_every" in checkpoint_config:
-            if not hasattr(args, "save_checkpoint_every") or args.save_checkpoint_every is None:
-                args.save_checkpoint_every = checkpoint_config["save_every"]
         if "model_output_path" in checkpoint_config:
             if not hasattr(args, "model_output_path") or args.model_output_path is None:
                 args.model_output_path = checkpoint_config["model_output_path"]
         if "resume" in checkpoint_config:
             if not hasattr(args, "resume") or args.resume is None:
                 args.resume = checkpoint_config["resume"]
-    
+
+    # Logging parametreleri
+    if "logging" in config:
+        logging_config = config["logging"]
+        if "log_path" in logging_config:
+            if not hasattr(args, "log_path") or args.log_path is None:
+                args.log_path = logging_config["log_path"]
+
     return args
 
 
@@ -475,12 +529,6 @@ def main():
         help="Eğitim cihazı (default: cuda varsa cuda, yoksa cpu)",
     )
     parser.add_argument(
-        "--save-checkpoint-every",
-        type=int,
-        default=None,
-        help="Her N epoch sonrası checkpoint kaydet (default: 0)",
-    )
-    parser.add_argument(
         "--resume",
         type=str,
         default=None,
@@ -493,13 +541,25 @@ def main():
         help="Embedding ve output head ağırlıklarını paylaş (Weight Tying) (default: True)",
     )
 
+    parser.add_argument(
+        "--log-path",
+        default=None,
+        help="Log dosyasının yolu (config'deki logging.log_path değerini override eder)",
+    )
+
     args = parser.parse_args()
 
     # Config dosyasını yükle
     if args.config:
-        print(f"Config dosyası yükleniyor: {args.config}")
         config = load_config(args.config)
         args = merge_config_and_args(config, args)
+
+    # Logger'ı kur (config yüklendikten sonra log_path belli olur)
+    log_path = getattr(args, "log_path", None)
+    logger = setup_logger(log_path)
+
+    if args.config:
+        logger.info(f"Config dosyası yüklendi: {args.config}")
     
     # Varsayılan değerleri ayarla (None ise)
     if args.tokenizer_path is None:
@@ -534,8 +594,6 @@ def main():
         args.weight_decay = 0.01
     if args.device is None:
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
-    if args.save_checkpoint_every is None:
-        args.save_checkpoint_every = 0
     if args.tie_weights is None:
         args.tie_weights = True
 
@@ -545,26 +603,26 @@ def main():
     model_output_path = Path(args.model_output_path).expanduser().resolve()
 
     if not tokenizer_path.exists():
-        print(f"Hata: Tokenizer dosyası bulunamadı: {tokenizer_path}")
+        logger.error(f"Tokenizer dosyası bulunamadı: {tokenizer_path}")
         sys.exit(1)
 
     if not data_dir.exists():
-        print(f"Hata: Veri dizini bulunamadı: {data_dir}")
+        logger.error(f"Veri dizini bulunamadı: {data_dir}")
         sys.exit(1)
 
     model_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Cihazı ayarla
     device = torch.device(args.device)
-    print(f"Kullanılan cihaz: {device}")
+    logger.info(f"Kullanılan cihaz: {device}")
 
     # Vocab boyutunu al
-    print(f"Tokenizer yükleniyor: {tokenizer_path}")
+    logger.info(f"Tokenizer yükleniyor: {tokenizer_path}")
     vocab_size = get_vocab_size(tokenizer_path)
-    print(f"Vocab boyutu: {vocab_size}")
+    logger.info(f"Vocab boyutu: {vocab_size}")
 
     # Dataset oluştur
-    print(f"Dataset oluşturuluyor: {data_dir}/{args.data_pattern}")
+    logger.info(f"Dataset oluşturuluyor: {data_dir}/{args.data_pattern}")
     dataset = BinaryTokenDataset(
         data_dir=data_dir,
         data_pattern=args.data_pattern,
@@ -576,7 +634,7 @@ def main():
     dataloader = DataLoader(dataset, batch_size=args.batch_size)
 
     # Model oluştur
-    print(f"Model oluşturuluyor...")
+    logger.info("Model oluşturuluyor...")
     model = SimpleTransformer(
         vocab_size=vocab_size,
         embedding_dim=args.embedding_dim,
@@ -591,8 +649,8 @@ def main():
     # Model parametrelerini yazdır
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Toplam parametreler: {total_params:,}")
-    print(f"Eğitilebilir parametreler: {trainable_params:,}")
+    logger.info(f"Toplam parametreler: {total_params:,}")
+    logger.info(f"Eğitilebilir parametreler: {trainable_params:,}")
 
     # Optimizer ve loss function
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -604,7 +662,7 @@ def main():
     if args.resume:
         resume_path = Path(args.resume).expanduser().resolve()
         if resume_path.exists():
-            print(f"Checkpoint yükleniyor: {resume_path}")
+            logger.info(f"Checkpoint yükleniyor: {resume_path}")
             checkpoint = torch.load(resume_path, map_location=device)
             model.load_state_dict(checkpoint["model_state_dict"])
             if "optimizer_state_dict" in checkpoint and optimizer is not None:
@@ -613,56 +671,64 @@ def main():
                 start_epoch = checkpoint["epoch"] + 1
             if "loss" in checkpoint:
                 best_loss = checkpoint["loss"]
-            print(f"✓ Checkpoint başarıyla yüklendi. Eğitim epoch {start_epoch} konumundan devam edecek. (Önceki Loss: {best_loss:.4f})")
+            logger.info(
+                f"✓ Checkpoint başarıyla yüklendi. Eğitim epoch {start_epoch} konumundan devam edecek. "
+                f"(Önceki Loss: {best_loss:.4f})"
+            )
         else:
-            print(f"Hata: Belirtilen checkpoint dosyası bulunamadı: {resume_path}")
+            logger.error(f"Belirtilen checkpoint dosyası bulunamadı: {resume_path}")
             sys.exit(1)
 
     # Eğitim döngüsü
-    print(f"\nEğitim başlıyor...")
-    print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}, LR: {args.learning_rate}")
-    print("-" * 80)
+    logger.info("Eğitim başlıyor...")
+    logger.info(f"Epochs: {args.epochs}, Batch size: {args.batch_size}, LR: {args.learning_rate}")
+    logger.info("-" * 80)
 
     try:
         for epoch in range(start_epoch, args.epochs + 1):
+            logger.info(f"Epoch {epoch}/{args.epochs} başladı")
             avg_loss = train_epoch(
                 model, dataloader, optimizer, criterion, device, epoch
             )
-            print(f"Epoch {epoch}/{args.epochs} - Ortalama Loss: {avg_loss:.4f}")
+            logger.info(f"Epoch {epoch}/{args.epochs} tamamlandı - Ortalama Loss: {avg_loss:.4f}")
 
-            # Checkpoint kaydet
-            if args.save_checkpoint_every > 0 and epoch % args.save_checkpoint_every == 0:
-                checkpoint_path = (
-                    model_output_path.parent
-                    / f"checkpoint_epoch_{epoch}.pt"
-                )
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "loss": avg_loss,
-                    },
-                    checkpoint_path,
-                )
-                print(f"Checkpoint kaydedildi: {checkpoint_path}")
+            # Her epoch sonunda checkpoint kaydet
+            checkpoint_path = (
+                model_output_path.parent
+                / f"checkpoint_epoch_{epoch}.pt"
+            )
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "loss": avg_loss,
+                },
+                checkpoint_path,
+            )
+            logger.info(f"Checkpoint kaydedildi: {checkpoint_path}")
 
             # En iyi modeli sakla
             if avg_loss < best_loss:
                 best_loss = avg_loss
                 torch.save(model.state_dict(), model_output_path)
-                print(f"✓ Model kaydedildi: {model_output_path}")
+                logger.info(f"✓ Yeni en iyi model kaydedildi: {model_output_path} (Loss: {avg_loss:.4f})")
 
     except KeyboardInterrupt:
-        print("\nEğitim kullanıcı tarafından durduruldu.")
+        logger.warning("Eğitim kullanıcı tarafından durduruldu (KeyboardInterrupt).")
         # Son modeli kaydet
         torch.save(model.state_dict(), model_output_path)
-        print(f"Model kaydedildi: {model_output_path}")
+        logger.info(f"Son model kaydedildi: {model_output_path}")
 
-    print("-" * 80)
-    print(f"Eğitim tamamlandı!")
-    print(f"Son model kaydedildi: {model_output_path}")
-    print(f"En iyi loss: {best_loss:.4f}")
+    except Exception as exc:
+        logger.error("Eğitim sırasında beklenmeyen bir hata oluştu!")
+        logger.error(traceback.format_exc())
+        raise
+
+    logger.info("-" * 80)
+    logger.info("Eğitim tamamlandı!")
+    logger.info(f"Son model kaydedildi: {model_output_path}")
+    logger.info(f"En iyi loss: {best_loss:.4f}")
 
 
 if __name__ == "__main__":

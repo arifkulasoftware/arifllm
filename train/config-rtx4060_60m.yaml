@@ -82,11 +82,14 @@ training:
 
 # Checkpoint ve model kayıt parametreleri
 checkpoint:
-  # Checkpoint kaydetme aralığı: 2 epoch
-  save_every: 2
-  
   # Model çıkış yolu (60M model olduğunu belirtmek için güncellendi)
   model_output_path: H:/data/models/model_rtx4060_60m.pt
+
+# Logging parametreleri
+logging:
+  # Log dosyasının yolu. Belirtilmezse sadece konsola yazılır.
+  # Eğitim ilerlemesi ve hatalar bu dosyaya kaydedilir.
+  log_path: H:/data/logs/train_rtx4060_60m.log
 
 # ============================================================================
 # MEMORY ESTIMATION (RTX 4060 8GB için)

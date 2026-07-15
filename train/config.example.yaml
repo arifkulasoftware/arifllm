@@ -28,5 +28,9 @@ training:
 
 # Checkpoint ve model kayıt parametreleri
 checkpoint:
-  save_every: 5
   model_output_path: H:/data/models/example-model.pt
+
+# Logging parametreleri
+logging:
+  # Log dosyasının yolu. Belirtilmezse sadece konsola yazılır.
+  log_path: H:/data/logs/train.log
