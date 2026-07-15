@@ -3,7 +3,7 @@
 
 # Tokenizer ve veri dizinleri (zorunlu - config veya komut satırında belirtilmeli)
 tokenizer_path: ../tokenleştirme/kendi_tokenizerim.json
-data_dir: ./data
+data_dir: H:/data/data_v2
 
 # Veri parametreleri
 data:
@@ -29,4 +29,4 @@ training:
 # Checkpoint ve model kayıt parametreleri
 checkpoint:
   save_every: 5
-  model_output_path: ./models/model.pt
+  model_output_path: H:/data/models/example-model.pt

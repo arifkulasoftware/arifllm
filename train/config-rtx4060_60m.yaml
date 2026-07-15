@@ -86,7 +86,7 @@ checkpoint:
   save_every: 2
   
   # Model çıkış yolu (60M model olduğunu belirtmek için güncellendi)
-  model_output_path: ./models/model_rtx4060_60m.pt
+  model_output_path: H:/data/models/model_rtx4060_60m.pt
 
 # ============================================================================
 # MEMORY ESTIMATION (RTX 4060 8GB için)

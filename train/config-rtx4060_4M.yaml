@@ -1,0 +1,35 @@
+# RTX 4060 8GB & 32GB RAM Sistem İçin LLM Model Konfigürasyonu
+# 4 Milyar Parametre (4B) & Alternatif 4 Milyon Parametre (4M)
+#
+# Donanım Özellikleri:
+#   - GPU: NVIDIA RTX 4060 8GB VRAM
+#   - CPU: Intel Core i7
+#   - Sistem Belleği (RAM): 32GB RAM
+#
+# ============================================================================
+# FİZİBİLİTE & BELLEK ANALİZİ (4 Milyar Parametre İçin)
+# ============================================================================
+#
+# 1. Eğitim (Training) Modu Bellek İhtiyacı:
+#   - Model Ağırlıkları (FP32): 4B * 4 bytes = ~16 GB
+#   - Gradients (FP32): ~16 GB
+#   - AdamW Optimizer States (FP32): 2 * 16 GB = ~32 GB
+#   - TOPLAM EĞİTİM BELLEĞİ: ~64 GB (Minimum)
+#   
+#   ⚠️ DİKKAT: 
+#   - CUDA GPU (8GB VRAM) üzerinde 4B model eğitimi doğrudan imkansızdır (CUDA Out of Memory).
+#   - CPU (32GB RAM) üzerinde eğitim için Windows Sanal Bellek (Page File) boyutunun
+#     en az 80GB+ olarak ayarlanması gerekir. Ancak disk takası nedeniyle eğitim 
+#     aşırı yavaş olacaktır.
+#
+# 2. Çalıştırma/Çıkarım (Inference) Modu Bellek İhtiyacı:
+#   - FP16 Hassasiyetinde: ~8 GB VRAM (GPU limitini zorlar)
+#   - 4-bit Quantize (GGUF/GPTQ vb.): ~2.5 - 3.0 GB VRAM (RTX 4060'ta çok rahat çalışır)
+#
+# ============================================================================
+# EĞİTİM İÇİN ÖNERİ: 
+# GPU üzerinde hızlı eğitim yapmak istiyorsanız aşağıdaki 4 Milyon (4M) 
+# parametreli alternatif konfigürasyon satırlarını aktif hale getirebilirsiniz.
+# ============================================================================
+
+ÇALIŞMAZ

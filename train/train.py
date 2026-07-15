@@ -22,7 +22,9 @@ Kullanım (Sadece komut satırı):
         --data-dir ./data \
         --model-output-path ./models/model.pt \
         --epochs 10 \
-        --batch-size 32
+        --batch-size 32 \
+        --resume path/to/checkpoint.pt
+
 """
 
 import argparse
