@@ -11,7 +11,7 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if base_dir not in sys.path:
     sys.path.insert(0, base_dir)
 
-from train.train import SimpleTransformer
+from eğitim.train import SimpleTransformer
 
 # Cihazı belirliyoruz (GPU varsa kullanılır, yoksa CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -68,9 +68,9 @@ def load_model(config_name_or_path, weights_path):
         # 2. Config Dosyası Yolu Belirleme
         config_path = config_name_or_path
         if config_name_or_path == "60M Model (Lokal)":
-            config_path = os.path.join(base_dir, "train", "config-rtx4060_60m.yaml")
+            config_path = os.path.join(base_dir, "eğitim", "config-rtx4060_60m.yaml")
         elif config_name_or_path == "20M Model (H: Sürücüsü)":
-            config_path = os.path.join(base_dir, "train", "config-rtx4060_20m.yaml")
+            config_path = os.path.join(base_dir, "eğitim", "config-rtx4060_6m.yaml")
             
         if not os.path.exists(config_path):
             return f"❌ Config dosyası bulunamadı:\n{config_path}"
@@ -160,11 +160,11 @@ def update_preset_paths(preset_name):
     Şablon seçimine göre konfigürasyon ve ağırlık yollarını günceller.
     """
     if preset_name == "60M Model (Lokal)":
-        cfg = os.path.join(base_dir, "train", "config-rtx4060_60m.yaml")
-        wgt = os.path.join(base_dir, "train", "models", "model_rtx4060_60m.pt")
+        cfg = os.path.join(base_dir, "eğitim", "config-rtx4060_60m.yaml")
+        wgt = os.path.join(base_dir, "eğitim", "models", "model_rtx4060_60m.pt")
     elif preset_name == "20M Model (H: Sürücüsü)":
-        cfg = os.path.join(base_dir, "train", "config-rtx4060_20m.yaml")
-        wgt = "H:/data/model/model_rtx4060_20M.pt"
+        cfg = os.path.join(base_dir, "eğitim", "config-rtx4060_6m.yaml")
+        wgt = "H:/data/model/model_rtx4060_6m.pt"
     else:  # Özel (Custom)
         cfg = ""
         wgt = ""
@@ -220,13 +220,13 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="slate")
                 )
                 
                 config_input = gr.Textbox(
-                    value=os.path.join(base_dir, "train", "config-rtx4060_60m.yaml"),
+                    value=os.path.join(base_dir, "eğitim", "config-rtx4060_60m.yaml"),
                     label="Model Config (YAML) Yolu",
                     placeholder="Konfigürasyon dosyası yolunu girin..."
                 )
                 
                 weights_input = gr.Textbox(
-                    value=os.path.join(base_dir, "train", "models", "model_rtx4060_60m.pt"),
+                    value=os.path.join(base_dir, "eğitim", "models", "model_rtx4060_60m.pt"),
                     label="Model Ağırlıkları (.pt) Yolu",
                     placeholder="Model ağırlıkları dosya yolunu girin..."
                 )

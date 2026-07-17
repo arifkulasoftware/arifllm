@@ -1,0 +1,205 @@
+# RTX 4060 8GB RAM İçin Optimize Edilmiş LLM Model Eğitim Konfigürasyonu
+# 200 Milyon Parametre - 151GB Tokenize Veri Seti
+#
+# RTX 4060 Spesifikasyonları:
+#   - VRAM: 8GB
+#   - Compute Capability: 8.9
+#   - Bellek kısıtlı GPU
+#
+# Optimizasyon Stratejisi:
+#   - batch_size: 4 (200M model için bellek tasarrufu)
+#   - gradient_accumulation_steps: 8 (efektif batch: 32)
+#   - context_length: 128 (200M model büyük VRAM kullanır)
+#   - embedding_dim: 1024 (200M parametre hedefi - GPT-2 Medium benzeri)
+#   - layers: 12 (200M parametre hedefi)
+#   - ff_dim: 4096 (4 × embedding_dim, standart transformer)
+#   - vocab_size: 65535
+#   - tie_weights: true (embedding ve output katmanı paylaşılır)
+#   - use_amp: true / bfloat16 (VRAM ~%30 azalır)
+#
+
+# Tokenizer ve veri dizinleri
+tokenizer_path: ../tokenleştirme/kendi_tokenizerim.json
+data_dir: H:/data/data_v2
+
+# Veri parametreleri
+data:
+  pattern: "veriseti*.bin"
+
+# Model mimarisi parametreleri (~218M parametre, vocab_size=65535)
+model:
+  # Embedding boyutu: 1024
+  # Token embedding: 65535 × 1024 = ~67.1M parametre
+  embedding_dim: 1024
+
+  # Transformer katman sayısı: 12
+  # Her katman: ~12.6M parametre
+  # 12 katman: ~151.1M parametre
+  # Toplam (embedding + layers, weight_tying=true): ~218M parametre
+  num_layers: 12
+
+  # Attention head sayısı: 16
+  # embedding_dim (1024) % num_heads (16) = 0 ✓
+  # head_dim = 1024 / 16 = 64 (optimal)
+  num_heads: 16
+
+  # Feed-forward iç katman: 4096
+  # Standart Transformer tasarımı (4 × embedding_dim)
+  ff_dim: 4096
+
+  # Context (sequence) uzunluğu: 128
+  # 200M model büyük VRAM kullandığından context kısıtlandı
+  # Attention matrisi O(seq²) ile büyüdüğünden kritik
+  # OOM alınırsa 64'e düşürülebilir
+  context_length: 128
+
+  # Dropout oranı: 0.1
+  # 200M model büyük olduğundan overfitting riski daha düşük
+  dropout: 0.1
+
+  # Ağırlık paylaşımı (Weight Tying)
+  # Embedding ve output katmanı aynı ağırlıkları paylaşır
+  # ~67M parametre bellek tasarrufu sağlar
+  tie_weights: true
+
+# Eğitim parametreleri (RTX 4060 8GB için 200M model)
+training:
+  # Epoch sayısı: 1
+  # 151GB = ~75.5 Milyar token (uint16, 2 byte/token)
+  # Tüm veriyi bir epoch için bile çok uzun sürer
+  # Checkpoint tabanlı eğitim önerilir (save_every_steps ile)
+  epochs: 1
+
+  # Batch boyutu: 4
+  # RTX 4060 8GB + 200M model için güvenli sınır
+  # Efektif batch = batch_size × gradient_accumulation_steps = 4 × 8 = 32
+  # ⚠ batch_size: 8 → OOM riski yüksek
+  batch_size: 4
+
+  # Gradient Accumulation: 8 adım
+  # Belleği artırmadan büyük batch simülasyonu (efektif batch: 32)
+  gradient_accumulation_steps: 8
+
+  # Learning rate: 0.00003 (3e-5)
+  # 200M model için 60M'e göre daha düşük LR önerilir
+  # Warmup ile birlikte kullanılmalı
+  learning_rate: 0.00003
+
+  # Learning rate warmup: 1000 adım
+  # Büyük modellerde gradient patlamalarını önler
+  warmup_steps: 1000
+
+  # Weight decay (L2 regularization): 0.1
+  # 200M model için standart değer
+  weight_decay: 0.1
+
+  # Gradient clipping
+  # Büyük modellerde gradient patlamasını önler
+  max_grad_norm: 1.0
+
+  # Cihaz: cuda (RTX 4060)
+  device: cuda
+
+  # Mixed precision (BF16)
+  # VRAM kullanımını ~%30 azaltır, eğitimi hızlandırır
+  # RTX 4060 BF16 destekler (Compute Capability 8.9)
+  use_amp: true
+  amp_dtype: bfloat16
+
+# Checkpoint ve model kayıt parametreleri
+checkpoint:
+  model_output_path: H:/data/models/model_rtx4060_200m.pt
+  # 151GB veri ile eğitim uzun süreceğinden sık checkpoint kritik
+  # Her ~1 saatte bir checkpoint kaydedilir
+  save_every_steps: 5000
+
+# Logging parametreleri
+logging:
+  log_path: H:/data/logs/train_rtx4060_200m.log
+  log_every_steps: 100
+
+# ============================================================================
+# PARAMETRE HESABI (vocab_size=65535, tie_weights=true)
+# ============================================================================
+#
+# Token Embedding:
+#   65535 × 1024 = 67,107,840 (~67.1M)
+#
+# Her Transformer Katmanı:
+#   Self-Attention (Q, K, V, O):  4 × 1024 × 1024 = 4,194,304
+#   Feed-Forward (W1, W2):        2 × 1024 × 4096 = 8,388,608
+#   Layer Norms + Biaslar:        ~8,192
+#   Katman başı toplam:           ~12,591,104
+#
+# 12 Katman Toplam:               ~151,093,248 (~151.1M)
+# Final Layer Norm:               ~2,048
+#
+# TOPLAM (weight_tying=true):     ~218,203,136 (~218M parametre)
+# (Output head, embedding ile paylaşıldığından tekrar sayılmaz)
+#
+# ============================================================================
+# BELLEK TAHMİNİ (RTX 4060 8GB, use_amp=true bfloat16)
+# ============================================================================
+#
+# Model Ağırlıkları (bf16): 218M × 2B  =   436 MB
+# Master Weights   (fp32): 218M × 4B  =   872 MB
+# Gradyanlar       (bf16): 218M × 2B  =   436 MB
+# Adam Optimizer   (fp32): 2×218M×4B  = 1,744 MB
+#   --- Statik Toplam ---              ~ 3,488 MB (~3.4 GB)
+#
+# Aktivasyonlar (batch=4, ctx=128, bf16):
+#   Attention scores: 4×16×128×128×2B = ~2 MB/katman
+#   Intermediate (FF, MHA):            ~50-80 MB/katman
+#   12 katman toplamı:                 ~600 MB - 1 GB
+#
+# PyTorch/CUDA Overhead:             ~1.0 - 1.5 GB
+#
+# TOPLAM TAHMİNİ:  ~5.5 - 6.5 GB  (8GB'ın %69-81'i) ✓
+# Güvenli headroom: ~1.5 - 2.5 GB kalan
+#
+# ⚠ batch_size=8 ile:    ~7.5-8 GB → OOM riski!
+# ⚠ use_amp=false ile:   Statik ~5 GB → zor sığar
+# ⚠ context_length=256:  Aktivasyonlar 4x artar → OOM
+#
+# ============================================================================
+# PERFORMANS TAHMİNİ
+# ============================================================================
+#
+# Veri seti: 151 GB = ~75.5 Milyar token (uint16, 2 byte/token)
+# context_length=128 ile örnek sayısı: ~590 Milyon örnek
+# batch_size=4 → ~147 Milyon batch/epoch
+#
+# RTX 4060 + 200M model + AMP tahmini:
+#   ~500-800 token/sn | ~1-1.5 step/sn
+#
+# Tüm 1 epoch tahmini süre:
+#   147M batch / 1.25 step/sn ≈ ~3.7 YIL (!)
+#
+# ⚠ ÖNEMLI: 151GB veriyi tek GPU ile tam eğitmek pratik değil.
+#   Önerilen yaklaşımlar:
+#   1. Her seferinde veri alt kümesi kullan (ör. 10-20GB chunk)
+#   2. Checkpoint tabanlı eğitim → durdur, devam et
+#   3. Curriculum learning: kısa context ile başla, artır
+#   4. Önemli noktada modeli değerlendirip eğitimi bitir
+#
+# save_every_steps: 5000 → yaklaşık her ~1 saatte checkpoint
+#
+# ============================================================================
+# KULLANIM ÖRNEĞİ
+# ============================================================================
+#
+# 1. Temel kullanım:
+#    python train.py --config config-rtx4060_200m.yaml
+#
+# 2. Batch size daha da küçülterek güvenli çalışma:
+#    python train.py --config config-rtx4060_200m.yaml --batch-size 2 --gradient-accumulation-steps 16
+#
+# 3. OOM hatası alınırsa:
+#    - batch_size: 2 yap
+#    - context_length: 64 yap
+#    - use_amp: true olduğundan emin ol
+#
+# 4. Checkpoint'ten devam:
+#    python train.py --config config-rtx4060_200m.yaml --resume H:/data/models/model_rtx4060_200m.pt
+#
+# ============================================================================
