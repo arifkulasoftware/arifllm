@@ -7,6 +7,10 @@ input directory recursively, tokenizes each line, and writes the resulting token
 binary files named like veriseti0001.bin, veriseti0002.bin, etc.
 Each output file is limited to at most 256MB of binary data.
 
+Token ID storage format is chosen automatically from the tokenizer vocab size:
+  - vocab_size <= 65536  -> uint16 (2 bytes, little-endian)
+  - vocab_size <= 4294967296 -> uint32 (4 bytes, little-endian)
+
 Usage:
     python tokenize_to_binary.py --max-workers 8 --input-dir "F:/My App/ai/data/all_txt" --output-dir "H:/data/data_v2" --tokenizer-path "kendi_tokenizerim.json"
     tüm data 24 saat 100Gb bellek peek
@@ -15,16 +19,68 @@ import argparse
 import os
 import shutil
 import struct
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, local
+from typing import Optional
 
 from tokenizers import Tokenizer
 
 MAX_OUTPUT_BYTES = 256 * 1024 * 1024
-TOKEN_SIZE_BYTES = 2
 _WORKER_STATE = local()
+
+
+@dataclass(frozen=True)
+class TokenStorage:
+    vocab_size: int
+    pack_format: str
+    token_size_bytes: int
+    max_token_id: int
+
+    @property
+    def dtype_label(self) -> str:
+        if self.token_size_bytes == 2:
+            return "uint16"
+        if self.token_size_bytes == 4:
+            return "uint32"
+        return f"{self.token_size_bytes}-byte"
+
+
+def resolve_token_storage(vocab_size: int) -> TokenStorage:
+    """Tokenizer vocab_size değerine göre binary yazım parametrelerini hesapla."""
+    if vocab_size <= 0:
+        raise ValueError(f"Geçersiz vocab_size: {vocab_size}")
+
+    max_token_id = vocab_size - 1
+
+    if vocab_size <= 65536:
+        return TokenStorage(
+            vocab_size=vocab_size,
+            pack_format="<H",
+            token_size_bytes=2,
+            max_token_id=max_token_id,
+        )
+
+    if vocab_size <= 4294967296:
+        return TokenStorage(
+            vocab_size=vocab_size,
+            pack_format="<I",
+            token_size_bytes=4,
+            max_token_id=max_token_id,
+        )
+
+    raise ValueError(
+        f"vocab_size={vocab_size} desteklenmiyor. "
+        "Maksimum desteklenen değer: 4294967296 (uint32)."
+    )
+
+
+def load_token_storage(tokenizer_path: str) -> TokenStorage:
+    """Tokenizer JSON dosyasını yükleyip binary yazım parametrelerini döndür."""
+    tokenizer = Tokenizer.from_file(tokenizer_path)
+    vocab_size = tokenizer.get_vocab_size()
+    return resolve_token_storage(vocab_size)
 
 
 def find_txt_files(input_dir: Path):
@@ -59,8 +115,8 @@ class ChunkWriter:
             self.handle.write(payload)
             self.bytes_written += len(payload)
 
-    def write_token(self, token_id: int):
-        self.write_bytes(struct.pack("<H", token_id))
+    def write_token(self, token_id: int, pack_format: str):
+        self.write_bytes(struct.pack(pack_format, token_id))
 
     def close(self):
         with self.lock:
@@ -69,14 +125,18 @@ class ChunkWriter:
                 self.handle = None
 
 
-def init_worker(tokenizer_path: str):
+def init_worker(tokenizer_path: str, pack_format: str, max_token_id: int):
     _WORKER_STATE.tokenizer = Tokenizer.from_file(tokenizer_path)
+    _WORKER_STATE.pack_format = pack_format
+    _WORKER_STATE.max_token_id = max_token_id
 
 
 def process_text_file(txt_path: Path, output_path: Path):
     try:
         tokenizer = getattr(_WORKER_STATE, "tokenizer", None)
-        if tokenizer is None:
+        pack_format = getattr(_WORKER_STATE, "pack_format", None)
+        max_token_id = getattr(_WORKER_STATE, "max_token_id", None)
+        if tokenizer is None or pack_format is None or max_token_id is None:
             raise RuntimeError("Tokenizer was not initialized for this worker")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +153,11 @@ def process_text_file(txt_path: Path, output_path: Path):
                         continue
 
                     for token_id in token_ids:
-                        out_fh.write(struct.pack("<H", token_id))
+                        if token_id < 0 or token_id > max_token_id:
+                            raise ValueError(
+                                f"Token ID {token_id} vocab aralığı dışında (0-{max_token_id})"
+                            )
+                        out_fh.write(struct.pack(pack_format, token_id))
     except Exception as exc:
         return False, str(txt_path), str(exc)
     return True, str(txt_path), None
@@ -113,8 +177,27 @@ def merge_temp_files(temp_dir: Path, output_dir: Path, prefix: str, max_bytes: i
         writer.close()
 
 
-def tokenize_to_binary(tokenizer_path: str, input_dir: Path, output_dir: Path, prefix: str = "veriseti", max_workers: int = 4):
+def tokenize_to_binary(
+    tokenizer_path: str,
+    input_dir: Path,
+    output_dir: Path,
+    prefix: str = "veriseti",
+    max_workers: int = 4,
+    storage: Optional[TokenStorage] = None,
+):
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if storage is None:
+        storage = load_token_storage(tokenizer_path)
+
+    tokens_per_chunk = MAX_OUTPUT_BYTES // storage.token_size_bytes
+    print(
+        f"Tokenizer: {tokenizer_path}\n"
+        f"  vocab_size       : {storage.vocab_size}\n"
+        f"  token storage    : {storage.dtype_label} "
+        f"({storage.token_size_bytes} byte, {storage.pack_format})\n"
+        f"  max chunk tokens : {tokens_per_chunk:,} per .bin file (256 MB limit)"
+    )
 
     txt_files = list(find_txt_files(input_dir))
     if not txt_files:
@@ -130,7 +213,11 @@ def tokenize_to_binary(tokenizer_path: str, input_dir: Path, output_dir: Path, p
     completed = 0
 
     try:
-        with ThreadPoolExecutor(max_workers=effective_workers, initializer=init_worker, initargs=(tokenizer_path,)) as executor:
+        with ThreadPoolExecutor(
+            max_workers=effective_workers,
+            initializer=init_worker,
+            initargs=(tokenizer_path, storage.pack_format, storage.max_token_id),
+        ) as executor:
             future_map = {
                 executor.submit(process_text_file, txt_path, temp_dir / f"{idx:04d}_{txt_path.stem}.bin"): txt_path
                 for idx, txt_path in enumerate(txt_files)
@@ -174,7 +261,19 @@ def main():
     if not input_dir.exists():
         raise SystemExit(f"Input directory not found: {input_dir}")
 
-    tokenize_to_binary(str(tokenizer_path), input_dir, output_dir, prefix=args.prefix, max_workers=args.max_workers)
+    try:
+        storage = load_token_storage(str(tokenizer_path))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    tokenize_to_binary(
+        str(tokenizer_path),
+        input_dir,
+        output_dir,
+        prefix=args.prefix,
+        max_workers=args.max_workers,
+        storage=storage,
+    )
 
 
 if __name__ == "__main__":

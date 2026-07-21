@@ -2,18 +2,21 @@
 """
 build_tokenizer.py
 
-Recursively scans an input directory for .txt files and trains a BPE tokenizer
-optimized for Turkish. Outputs the tokenizer JSON as `kendi_tokenizerim.json`
-inside the given output directory (defaults to this script's folder).
+Türkçe veriler için tokenizer oluşturma işlemini yapar, input_dir ile belirtilen kaynak
+ve altındaki kaynaklar reküsiv olarak taranır ve .txt dosyalarından beilrtilen vocab_size için tokenlar
+BPE tokenizer kullanılarak oluşturulur.
+sonuç ön tanımlı olarak kendi_tokenizerim.json dosyasına yazılır.
 
 Requirements: tokenizers (huggingface)
 
 Usage example:
-  python build_tokenizer.py --vocab-size 65535 --min-frequency 5 --lowercase --input-dir "H:/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
+  python build_tokenizer.py --vocab-size 131072 --min-frequency 5 --lowercase --input-dir "F:/My App/ai/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
 
-note : 
-1) vocab_size az da verilse çokta verilse tüm veriler kullanıldığında, min-frequency 10000 ve üstü için token oluşmadı
-2) data mC4 hariç --vocab-size 65535 --min-frequency 100 --lowercase --input-dir "H:/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
+notlar 
+* 300 Gb txt veri için çalıştığında 65335 vocab_size için 90GB bellek kullanımı oluştu
+* min-frequency 10000 ve üstü için token oluşmadı
+* mC4 hariç --vocab-size 65535 --min-frequency 100 --lowercase oluştu
+* 4.5Gb txt veri. (sadece kitaplar , archive.org,epubs,pdf) --vocab-size 131072 --min-frequency 2 --lowercase -> 10dk işlem süresi ve vocab_size=129090 oldu.
 
 """
 import argparse
