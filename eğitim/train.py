@@ -18,7 +18,7 @@ Büyük veri seti özellikleri (151GB+ için):
 - Checkpoint'ten devam (--resume)
 
 Kullanım (Config dosyası ile - önerilen):
-    python train.py --config config-rtx4060_200m.yaml
+    python train.py --config config-rtx4060_vs131k_d4gb_p92m.yaml
 
 Kullanım (Config + CLI override):
     python train.py --config config-rtx4060_200m.yaml --batch-size 2
@@ -107,6 +107,22 @@ def setup_logger(log_path: Path = None) -> logging.Logger:
 
 
 # ---------------------------------------------------------------------------
+# Binary token storage (tokenize_to_binary.py ile uyumlu)
+# ---------------------------------------------------------------------------
+
+def resolve_token_dtype(vocab_size: int) -> np.dtype:
+    """Tokenizer vocab_size değerine göre binary dosya dtype'ını seç."""
+    if vocab_size <= 65536:
+        return np.uint16
+    if vocab_size <= 4294967296:
+        return np.uint32
+    raise ValueError(
+        f"vocab_size={vocab_size} desteklenmiyor. "
+        "Maksimum desteklenen değer: 4294967296 (uint32)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dataset: Chunk tabanlı (büyük veri setleri için)
 # ---------------------------------------------------------------------------
 
@@ -128,14 +144,16 @@ class ChunkedBinaryTokenDataset(IterableDataset):
         context_length: int = 512,
         vocab_size: int = None,
         chunk_size_gb: float = 10.0,
+        token_dtype: np.dtype = np.uint16,
         shuffle_files: bool = False,
     ):
         self.data_dir = Path(data_dir)
         self.data_pattern = data_pattern
         self.context_length = context_length
         self.vocab_size = vocab_size
-        # uint16 → 2 byte/token
-        self.chunk_size_tokens = int(chunk_size_gb * 1024 ** 3 / 2)
+        self.token_dtype = token_dtype
+        self.token_size_bytes = np.dtype(token_dtype).itemsize
+        self.chunk_size_tokens = int(chunk_size_gb * 1024 ** 3 / self.token_size_bytes)
         self.shuffle_files = shuffle_files
 
         self.bin_files: List[Path] = sorted(self.data_dir.glob(data_pattern))
@@ -150,6 +168,7 @@ class ChunkedBinaryTokenDataset(IterableDataset):
         _log.info(
             f"Bulunan {len(self.bin_files)} binary dosya | "
             f"Toplam boyut: {total_gb:.1f} GB | "
+            f"Token dtype: {self.token_dtype} ({self.token_size_bytes} byte) | "
             f"Chunk boyutu: {chunk_size_gb:.1f} GB"
         )
 
@@ -163,14 +182,14 @@ class ChunkedBinaryTokenDataset(IterableDataset):
             import random
             random.shuffle(files)
 
-        buffer = np.array([], dtype=np.uint16)
+        buffer = np.array([], dtype=self.token_dtype)
 
         for bin_file in files:
             _log = logging.getLogger("train")
             size_gb = bin_file.stat().st_size / 1024 ** 3
             _log.info(f"Okunuyor: {bin_file.name}  ({size_gb:.2f} GB)")
             try:
-                file_tokens = np.fromfile(bin_file, dtype=np.uint16)
+                file_tokens = np.fromfile(bin_file, dtype=self.token_dtype)
             except Exception as exc:
                 _log.error(f"Dosya okunurken hata: {bin_file}  →  {exc}")
                 continue
@@ -546,7 +565,10 @@ def train(
                         logits = model(input_ids)
                         loss   = criterion(logits, target_ids)
                         loss   = loss / grad_accum
-                    scaler.scale(loss).backward()
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
                 else:
                     logits = model(input_ids)
                     loss   = criterion(logits, target_ids) / grad_accum
@@ -562,7 +584,7 @@ def train(
                 is_accum_step = ((batch_idx + 1) % grad_accum == 0)
 
                 if is_accum_step:
-                    if use_amp and device.type == "cuda":
+                    if use_amp and device.type == "cuda" and scaler is not None:
                         scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                         scaler.step(optimizer)
@@ -609,7 +631,7 @@ def train(
 
             # ----- Kalan gradyanları uygula (son batch tamamlanmamış olabilir) -----
             if (batch_idx + 1) % grad_accum != 0:
-                if use_amp and device.type == "cuda":
+                if use_amp and device.type == "cuda" and scaler is not None:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                     scaler.step(optimizer)
@@ -834,7 +856,8 @@ def main():
     # ------ Vocab ------
     logger.info(f"Tokenizer yükleniyor: {tokenizer_path}")
     vocab_size = get_vocab_size(tokenizer_path)
-    logger.info(f"Vocab boyutu: {vocab_size:,}")
+    token_dtype = resolve_token_dtype(vocab_size)
+    logger.info(f"Vocab boyutu: {vocab_size:,}  |  Binary dtype: {token_dtype}")
 
     # ------ Dataset & DataLoader ------
     logger.info(f"Dataset oluşturuluyor: {data_dir}/{args.data_pattern}")
@@ -844,6 +867,7 @@ def main():
         context_length=args.context_length,
         vocab_size=vocab_size,
         chunk_size_gb=args.chunk_size_gb,
+        token_dtype=token_dtype,
     )
     dataloader = DataLoader(
         dataset,

@@ -1,0 +1,141 @@
+# RTX 4060 8GB — vocab_size=131072, ~3.94 GB tokenize veri (uint32)
+#
+# Hedef: Chinchilla ölçeğine yakın, büyük vocab ile VRAM'e sığan ~93M parametre modeli
+#
+# Veri:
+#   3.94 GB binary (uint32) ≈ 1.06 milyar token
+#   Tokenizer: kendi_tokenizerim.json (vocab_size=131072)
+#
+# Parametre seçimi gerekçesi:
+#   Chinchilla compute-optimal: ~1.06B token / 20 ≈ 53M parametre
+#   Ancak vocab=131072 ile embedding tek başına 67M+ parametre tüketir;
+#   bu nedenle pratik optimum ~90-100M aralığında (embedding_dim=512, 8 katman)
+#   3 epoch → ~34 token/param (Chinchilla 20'ye yaklaşır)
+#
+# RTX 4060 Spesifikasyonları:
+#   - VRAM: 8GB | Compute Capability: 8.9
+#   - BF16 AMP destekli
+
+# Tokenizer ve veri dizinleri
+tokenizer_path: ../tokenleştirme/kendi_tokenizerim.json
+data_dir: H:/data/data_v2
+
+# Veri parametreleri
+data:
+  pattern: "veriseti*.bin"
+
+# 3.94 GB veri seti RAM'e rahat sığar; chunk boyutunu küçük tut
+chunk_size_gb: 2.0
+
+# Model mimarisi (~92.4M parametre, vocab_size=131072, tie_weights=true)
+model:
+  # Token embedding: 131072 × 512 = 67,108,864 (~67.1M)
+  embedding_dim: 512
+
+  # 8 katman × ~3.15M = ~25.2M transformer parametresi
+  num_layers: 8
+
+  # embedding_dim (512) % num_heads (8) = 0 ✓  head_dim = 64
+  num_heads: 8
+
+  # Standart 4 × embedding_dim
+  ff_dim: 2048
+
+  # 256 token bağlam — bellek/performans dengesi
+  context_length: 256
+
+  # ~1B token veri için hafif regularization
+  dropout: 0.15
+
+  tie_weights: true
+
+# Eğitim parametreleri
+training:
+  # 3 epoch → ~3.2 milyar token görülür (~34 token/param)
+  epochs: 3
+
+  # batch=12 × grad_accum=4 → efektif batch=48
+  batch_size: 12
+  gradient_accumulation_steps: 4
+
+  # ~93M model için 60M (1e-4) ile 200M (3e-5) arası
+  learning_rate: 0.00005
+
+  warmup_steps: 800
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  device: cuda
+
+  use_amp: true
+  amp_dtype: bfloat16
+
+checkpoint:
+  model_output_path: H:/data/models/model_rtx4060_vs131k_d4gb_p92m.pt
+  save_every_steps: 2000
+
+logging:
+  log_path: H:/data/logs/train_rtx4060_vs131k_d4gb_p92m.log
+  log_every_steps: 100
+
+# ============================================================================
+# PARAMETRE HESABI (vocab_size=131072, tie_weights=true)
+# ============================================================================
+#
+# Token Embedding:     131072 × 512  = 67,108,864  (~67.1M)
+# Positional Embedding: 256 × 512      =    131,072  (~0.1M)
+#
+# Her Transformer Katmanı (d=512, ff=2048):
+#   Self-Attention (Q,K,V,O):  4 × 512²     = 1,048,576
+#   Feed-Forward (W1, W2):     2 × 512 × 2048 = 2,097,152
+#   Layer Norms:                 ~2,048
+#   Katman başı:                 ~3,147,776
+#
+# 8 Katman Toplam:                   ~25,182,208  (~25.2M)
+#
+# TOPLAM:                            ~92,422,144  (~92.4M)
+#
+# ============================================================================
+# BELLEK TAHMİNİ (RTX 4060 8GB, use_amp=true bfloat16)
+# ============================================================================
+#
+# Model statik (bf16+fp32 master+grad+Adam):  ~1.5 GB
+# Aktivasyonlar (batch=12, ctx=256, 8 katman): ~1.5 - 2.0 GB
+# PyTorch/CUDA overhead:                        ~1.0 - 1.5 GB
+#
+# TOPLAM TAHMİNİ:  ~4.0 - 5.0 GB  (8GB'ın %50-63'ü) ✓
+# Headroom: ~3-4 GB
+#
+# ⚠ batch_size=16 ile OOM riski artar
+# ⚠ context_length=512 → aktivasyonlar 4x, OOM riski
+#
+# ============================================================================
+# PERFORMANS TAHMİNİ
+# ============================================================================
+#
+# Veri: 3.94 GB uint32 ≈ 1.06 milyar token
+# context_length=256 → ~4.1 milyon örnek/epoch
+# batch_size=12 → ~342K micro-batch/epoch
+# grad_accum=4 → ~85K optimizer step/epoch
+#
+# RTX 4060 + 93M model + BF16 tahmini:
+#   ~1500-2500 corpus token/saniye
+#
+# 1 epoch tahmini:  1.06B / 2000 ≈ 6 gün
+# 3 epoch tahmini:  ~17-20 gün
+#
+# save_every_steps: 2000 → yaklaşık her 2-3 saatte checkpoint
+#
+# ============================================================================
+# KULLANIM
+# ============================================================================
+#
+# 1. Temel:
+#    python train.py --config config-rtx4060_131k_4gb.yaml
+#
+# 2. OOM alınırsa:
+#    python train.py --config config-rtx4060_131k_4gb.yaml --batch-size 8 --gradient-accumulation-steps 6
+#
+# 3. Checkpoint'ten devam:
+#    python train.py --config config-rtx4060_131k_4gb.yaml --resume H:/data/models/model_rtx4060_131k_4gb_ckpt_step_4000.pt
+#
+# ============================================================================
