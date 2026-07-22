@@ -70,7 +70,7 @@ training:
   amp_dtype: bfloat16
 
 checkpoint:
-  model_output_path: H:/data/models/model_rtx4060_vs131k_d4gb_p92m.pt
+  model_output_path: H:/data/models/model_rtx4060_131k_4gb.pt
   save_every_steps: 2000
 
 logging:

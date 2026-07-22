@@ -1,87 +1,147 @@
 import os
 import sys
-import torch
-import torch.nn as nn
-import yaml
+from pathlib import Path
+
 import gradio as gr
+import torch
+import yaml
 from tokenizers import Tokenizer
 
-# Projenin kök dizinini sys.path'e ekliyoruz
-base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if base_dir not in sys.path:
-    sys.path.insert(0, base_dir)
+base_dir = Path(__file__).resolve().parent.parent
+egitim_dir = base_dir / "eğitim"
+
+if str(base_dir) not in sys.path:
+    sys.path.insert(0, str(base_dir))
 
 from eğitim.train import SimpleTransformer
 
-# Cihazı belirliyoruz (GPU varsa kullanılır, yoksa CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Tokenizer varsayılan yolu
-tokenizer_path = os.path.join(base_dir, "tokenleştirme", "kendi_tokenizerim.json")
-
-# Global model ve tokenizer durumunu tutan değişkenler
 current_model = None
 tokenizer = None
 current_context_length = 256
 
+
+def discover_config_files() -> list[str]:
+    """eğitim/ altındaki geçerli config*.yaml dosyalarını listele."""
+    configs: list[str] = []
+    for config_path in sorted(egitim_dir.glob("config*.yaml")):
+        try:
+            with config_path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            if isinstance(data, dict) and data.get("model"):
+                configs.append(config_path.name)
+        except Exception:
+            continue
+    return configs
+
+
+def resolve_config_path(config_name: str) -> Path:
+    return (egitim_dir / config_name).resolve()
+
+
+def resolve_path(path_value: str, base_dir_for_relative: Path) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (base_dir_for_relative / path).resolve()
+
+
+def read_config(config_name: str) -> dict:
+    config_path = resolve_config_path(config_name)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config dosyası bulunamadı: {config_path}")
+
+    with config_path.open("r", encoding="utf-8") as fh:
+        config = yaml.safe_load(fh)
+
+    if not isinstance(config, dict) or not config.get("model"):
+        raise ValueError(f"Geçersiz config dosyası (model bölümü yok): {config_path}")
+
+    return config
+
+
+def get_paths_from_config(config_name: str) -> tuple[Path, Path, Path]:
+    """Config'ten tokenizer, model ağırlık ve config dosya yollarını çıkar."""
+    config_path = resolve_config_path(config_name)
+    config = read_config(config_name)
+
+    tokenizer_rel = config.get("tokenizer_path", "../tokenleştirme/kendi_tokenizerim.json")
+    tokenizer_file = resolve_path(tokenizer_rel, config_path.parent)
+
+    checkpoint_cfg = config.get("checkpoint", {})
+    weights_rel = checkpoint_cfg.get("model_output_path")
+    if not weights_rel:
+        raise ValueError(
+            f"Config dosyasında checkpoint.model_output_path tanımlı değil: {config_name}"
+        )
+    weights_file = resolve_path(weights_rel, config_path.parent)
+
+    return config_path, tokenizer_file, weights_file
+
+
+def describe_config(config_name: str) -> str:
+    """Seçilen config için özet bilgi döndür."""
+    try:
+        config_path, tokenizer_file, weights_file = get_paths_from_config(config_name)
+        model_cfg = read_config(config_name).get("model", {})
+        lines = [
+            f"Config: {config_path}",
+            f"Tokenizer: {tokenizer_file}",
+            f"Model ağırlıkları: {weights_file}",
+            f"Mimari: embed={model_cfg.get('embedding_dim')} | "
+            f"layers={model_cfg.get('num_layers')} | "
+            f"heads={model_cfg.get('num_heads')} | "
+            f"context={model_cfg.get('context_length')}",
+        ]
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Config okunamadı: {exc}"
+
+
 @torch.no_grad()
 def generate(model, idx, max_new_tokens, context_length, temperature=0.7):
-    """
-    Modelden yeni kelimeler (tokenler) üretmek için otoregresif döngü.
-    """
     model.eval()
     for _ in range(max_new_tokens):
-        # Context boyutu sınırını geçmemesi için son kısmı kırpıyoruz
         idx_cond = idx[:, -context_length:]
-        # Modelden logits değerlerini alıyoruz
-        logits = model(idx_cond)  # Şekil: (batch_size, vocab_size)
-        
-        # Temperature (yaratıcılık derecesi) kontrolü
+        logits = model(idx_cond)
+        if logits.dim() == 3:
+            logits = logits[:, -1, :]
+
         if temperature <= 0.0:
-            # Greedy decoding (en yüksek olasılıklı olanı doğrudan al)
             idx_next = torch.argmax(logits, dim=-1, keepdim=True)
         else:
-            # Logit değerlerini temperature'a bölüp olasılık dağılımı elde etme
             logits = logits / temperature
             probs = torch.softmax(logits, dim=-1)
-            # Olasılıklara göre rastgele örnekleme
             idx_next = torch.multinomial(probs, num_samples=1)
-            
-        # Yeni üretilen tokeni mevcut context'e ekliyoruz
+
         idx = torch.cat((idx, idx_next), dim=1)
-        
+
     return idx
 
-def load_model(config_name_or_path, weights_path):
-    """
-    Belirtilen konfigürasyon ve ağırlık dosyasını kullanarak modeli yükler.
-    """
+
+def load_model(config_name: str):
+    """Seçilen config dosyasındaki parametrelere göre modeli yükle."""
     global current_model, tokenizer, current_context_length
-    
+
+    if not config_name:
+        return "Lütfen bir config dosyası seçin."
+
     try:
-        # 1. Tokenizer Yükleme
-        if not os.path.exists(tokenizer_path):
-            return f"❌ Tokenizer dosyası bulunamadı:\n{tokenizer_path}"
-        tokenizer = Tokenizer.from_file(tokenizer_path)
+        config_path, tokenizer_file, weights_file = get_paths_from_config(config_name)
+        config = read_config(config_name)
+        model_cfg = config["model"]
+
+        if not tokenizer_file.exists():
+            return f"❌ Tokenizer dosyası bulunamadı:\n{tokenizer_file}"
+
+        if not weights_file.exists():
+            return f"❌ Model ağırlık dosyası bulunamadı:\n{weights_file}"
+
+        tokenizer = Tokenizer.from_file(str(tokenizer_file))
         vocab_size = tokenizer.get_vocab_size()
-        
-        # 2. Config Dosyası Yolu Belirleme
-        config_path = config_name_or_path
-        if config_name_or_path == "60M Model (Lokal)":
-            config_path = os.path.join(base_dir, "eğitim", "config-rtx4060_60m.yaml")
-        elif config_name_or_path == "20M Model (H: Sürücüsü)":
-            config_path = os.path.join(base_dir, "eğitim", "config-rtx4060_6m.yaml")
-            
-        if not os.path.exists(config_path):
-            return f"❌ Config dosyası bulunamadı:\n{config_path}"
-            
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-            
-        model_cfg = config.get("model", {})
         current_context_length = model_cfg.get("context_length", 256)
-        
-        # 3. SimpleTransformer Modelini Oluşturma
+
         model = SimpleTransformer(
             vocab_size=vocab_size,
             embedding_dim=model_cfg.get("embedding_dim", 256),
@@ -90,87 +150,63 @@ def load_model(config_name_or_path, weights_path):
             ff_dim=model_cfg.get("ff_dim", 1024),
             context_length=current_context_length,
             dropout=model_cfg.get("dropout", 0.1),
-            tie_weights=model_cfg.get("tie_weights", True)
+            tie_weights=model_cfg.get("tie_weights", True),
         )
-        
-        # 4. Model Ağırlıklarını Yükleme
-        if not os.path.exists(weights_path):
-            return f"❌ Model ağırlık dosyası bulunamadı:\n{weights_path}"
-            
-        checkpoint = torch.load(weights_path, map_location=device)
+
+        checkpoint = torch.load(weights_file, map_location=device)
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             model.load_state_dict(checkpoint["model_state_dict"])
         else:
             model.load_state_dict(checkpoint)
-            
+
         model.to(device)
         model.eval()
-        
         current_model = model
-        
+
         total_params = sum(p.numel() for p in model.parameters())
-        status_msg = (
+        return (
             f"✅ Model başarıyla yüklendi!\n"
+            f"- Config: {config_path.name}\n"
             f"- Cihaz: {device.type.upper()}\n"
-            f"- Parametre Sayısı: {total_params:,}\n"
-            f"- Bağlam Genişliği (Context): {current_context_length}\n"
-            f"- Kelime Haznesi (Vocab): {vocab_size}"
+            f"- Parametre sayısı: {total_params:,}\n"
+            f"- Context length: {current_context_length}\n"
+            f"- Vocab size: {vocab_size:,}\n"
+            f"- Ağırlıklar: {weights_file}"
         )
-        return status_msg
-        
-    except Exception as e:
+
+    except Exception as exc:
         current_model = None
-        return f"❌ Model yüklenirken hata oluştu:\n{str(e)}"
+        return f"❌ Model yüklenirken hata oluştu:\n{exc}"
+
 
 def predict(prompt, creativity, max_tokens):
-    """
-    Gradio arayüzünden gelen girdileri alıp metin üretimi yapar.
-    """
     if not prompt or not prompt.strip():
         return "Lütfen bir başlangıç metni yazın."
-        
+
     if current_model is None:
-        return "Hata: Yüklü bir model bulunmuyor. Lütfen Model Ayarları bölümünden modeli yükleyin."
-        
+        return "Hata: Yüklü model yok. Lütfen bir config seçip modeli yükleyin."
+
     try:
-        # Kullanıcının metnini token ID listesine çevir
         encoded = tokenizer.encode(prompt).ids
         if len(encoded) == 0:
             return "Geçersiz veya boş başlangıç cümlesi."
-            
+
         context = torch.tensor([encoded], dtype=torch.long, device=device)
-        
-        # Otoregresif olarak token üret
         generated = generate(
             model=current_model,
             idx=context,
             max_new_tokens=int(max_tokens),
             context_length=current_context_length,
-            temperature=float(creativity)
+            temperature=float(creativity),
         )
-        
-        # ID listesini tekrar okunabilir metne çevir
-        output_text = tokenizer.decode(generated[0].tolist())
-        return output_text
-    except Exception as e:
-        return f"Metin üretilirken hata oluştu: {str(e)}"
+        return tokenizer.decode(generated[0].tolist())
+    except Exception as exc:
+        return f"Metin üretilirken hata oluştu: {exc}"
 
-def update_preset_paths(preset_name):
-    """
-    Şablon seçimine göre konfigürasyon ve ağırlık yollarını günceller.
-    """
-    if preset_name == "60M Model (Lokal)":
-        cfg = os.path.join(base_dir, "eğitim", "config-rtx4060_60m.yaml")
-        wgt = os.path.join(base_dir, "eğitim", "models", "model_rtx4060_60m.pt")
-    elif preset_name == "20M Model (H: Sürücüsü)":
-        cfg = os.path.join(base_dir, "eğitim", "config-rtx4060_6m.yaml")
-        wgt = "H:/data/model/model_rtx4060_6m.pt"
-    else:  # Özel (Custom)
-        cfg = ""
-        wgt = ""
-    return cfg, wgt
 
-# Premium Arayüz Tasarımı ve CSS Kodları
+CONFIG_CHOICES = discover_config_files()
+DEFAULT_CONFIG = CONFIG_CHOICES[0] if CONFIG_CHOICES else None
+
 custom_css = """
 .header-card {
     background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
@@ -196,106 +232,95 @@ custom_css = """
 }
 """
 
-with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="slate"), css=custom_css) as demo:
-    
-    # HTML Banner
+with gr.Blocks(
+    theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="slate"),
+    css=custom_css,
+) as demo:
     gr.HTML(
         """
         <div class="header-card">
             <h1>🤖 Benim İlk Lokal LLM Asistanım</h1>
-            <p>Sıfırdan eğittiğiniz transformer dil modelini test edin! Metin başlangıcı girerek devamını üretmesini sağlayın.</p>
+            <p>Eğitim config dosyasını seçin; model mimarisi, tokenizer ve ağırlık yolu otomatik yüklensin.</p>
         </div>
         """
     )
-        
+
     with gr.Row():
-        # Sol Sütun: Ayarlar ve Parametreler
         with gr.Column(scale=1):
-            
-            with gr.Accordion("⚙️ Model Yükleme Ayarları", open=True):
-                preset_selector = gr.Dropdown(
-                    choices=["60M Model (Lokal)", "20M Model (H: Sürücüsü)", "Özel (Custom)"],
-                    value="60M Model (Lokal)",
-                    label="Model Şablonu"
+            with gr.Accordion("⚙️ Model Yükleme", open=True):
+                config_selector = gr.Dropdown(
+                    choices=CONFIG_CHOICES,
+                    value=DEFAULT_CONFIG,
+                    label="Eğitim Config Dosyası",
+                    info="eğitim/ altındaki config*.yaml dosyaları",
                 )
-                
-                config_input = gr.Textbox(
-                    value=os.path.join(base_dir, "eğitim", "config-rtx4060_60m.yaml"),
-                    label="Model Config (YAML) Yolu",
-                    placeholder="Konfigürasyon dosyası yolunu girin..."
+
+                config_info = gr.Textbox(
+                    label="Config Özeti",
+                    value=describe_config(DEFAULT_CONFIG) if DEFAULT_CONFIG else "Config bulunamadı.",
+                    lines=6,
+                    interactive=False,
                 )
-                
-                weights_input = gr.Textbox(
-                    value=os.path.join(base_dir, "eğitim", "models", "model_rtx4060_60m.pt"),
-                    label="Model Ağırlıkları (.pt) Yolu",
-                    placeholder="Model ağırlıkları dosya yolunu girin..."
-                )
-                
+
                 load_btn = gr.Button("🔄 Model Yükle / Güncelle", variant="secondary")
                 status_box = gr.Textbox(
                     label="Yükleme Durumu",
-                    value="Bekleniyor... Modeli yüklemek için butona tıklayın.",
-                    lines=4,
+                    value="Bekleniyor... Bir config seçip modeli yükleyin.",
+                    lines=6,
                     interactive=False,
-                    elem_classes=["status-box"]
+                    elem_classes=["status-box"],
                 )
 
             with gr.Group():
                 slider = gr.Slider(
-                    minimum=0.1, 
-                    maximum=1.5, 
-                    value=0.7, 
-                    step=0.05, 
+                    minimum=0.1,
+                    maximum=1.5,
+                    value=0.7,
+                    step=0.05,
                     label="Yaratıcılık Derecesi (Temperature)",
-                    info="Düşük değerler tutarlı, yüksek değerler yaratıcı çıktılar üretir."
+                    info="Düşük değerler tutarlı, yüksek değerler yaratıcı çıktılar üretir.",
                 )
                 max_tokens = gr.Slider(
-                    minimum=10, 
-                    maximum=500, 
-                    value=150, 
-                    step=10, 
-                    label="Maksimum Token Sayısı"
+                    minimum=10,
+                    maximum=500,
+                    value=150,
+                    step=10,
+                    label="Maksimum Token Sayısı",
                 )
 
-        # Sağ Sütun: Çıktı ve prompt alanı
         with gr.Column(scale=2):
             input_text = gr.Textbox(
-                label="Başlangıç Cümlesi (Prompt)", 
-                placeholder="Modelin devam ettirmesini istediğiniz bir cümle yazın...", 
-                lines=5
+                label="Başlangıç Cümlesi (Prompt)",
+                placeholder="Modelin devam ettirmesini istediğiniz bir cümle yazın...",
+                lines=5,
             )
             submit_btn = gr.Button("✍️ Metin Üret", variant="primary")
-            
-            output_text = gr.Textbox(
-                label="Modelin Yanıtı / Tamamlaması", 
-                lines=12
-            )
+            output_text = gr.Textbox(label="Modelin Yanıtı / Tamamlaması", lines=12)
 
-    # Tetikleyiciler (Event Handlers)
-    preset_selector.change(
-        fn=update_preset_paths,
-        inputs=preset_selector,
-        outputs=[config_input, weights_input]
+    config_selector.change(
+        fn=describe_config,
+        inputs=config_selector,
+        outputs=config_info,
     )
-    
+
     load_btn.click(
         fn=load_model,
-        inputs=[config_input, weights_input],
-        outputs=status_box
-    )
-    
-    submit_btn.click(
-        fn=predict, 
-        inputs=[input_text, slider, max_tokens], 
-        outputs=output_text
+        inputs=config_selector,
+        outputs=status_box,
     )
 
-    # Sayfa ilk yüklendiğinde otomatik model yüklemeyi dene
-    demo.load(
-        fn=load_model,
-        inputs=[config_input, weights_input],
-        outputs=status_box
+    submit_btn.click(
+        fn=predict,
+        inputs=[input_text, slider, max_tokens],
+        outputs=output_text,
     )
+
+    if DEFAULT_CONFIG:
+        demo.load(
+            fn=load_model,
+            inputs=config_selector,
+            outputs=status_box,
+        )
 
 if __name__ == "__main__":
     demo.launch()

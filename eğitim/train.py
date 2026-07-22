@@ -5,6 +5,7 @@ LLM Model Training Script
 Bu script:
 - kendi_tokenizerim.json dosyasını yükler
 - Binary dosyalarından (veriseti*.bin) eğitim verilerini okur
+- Causal (GPT-style) Transformer ile her pozisyonda next-token prediction yapar
 - PyTorch kullanarak LLM modeli eğitir
 - Eğitilen modeli kaydeder
 
@@ -209,31 +210,38 @@ class ChunkedBinaryTokenDataset(IterableDataset):
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """
         Chunk'ları sırayla işleyerek (input, target) çiftleri döndürür.
-        Her chunk işlendikten sonra bellek serbest bırakılır.
+
+        Her örnek context_length token uzunluğundadır:
+          - input:  [t0, t1, ..., t_{n-1}]
+          - target: [t1, t2, ..., t_n]   (her pozisyonda sonraki token)
+
+        Böylece her pencerede context_length adet next-token hedefi eğitilir.
         """
+        seq_len = self.context_length + 1
+
         for chunk in self._iter_chunks():
-            num_examples = len(chunk) // (self.context_length + 1)
+            num_examples = len(chunk) // seq_len
 
             for i in range(num_examples):
-                start = i * self.context_length
-                end = start + self.context_length
+                segment = chunk[i * seq_len : (i + 1) * seq_len]
+                if len(segment) < seq_len:
+                    continue
 
-                input_tokens = chunk[start:end]
-                target_token = chunk[end]
+                input_tokens = segment[:-1]
+                target_tokens = segment[1:]
 
-                # vocab_size sınır kontrolü
                 if self.vocab_size is not None:
                     if (input_tokens >= self.vocab_size).any():
                         continue
-                    if target_token >= self.vocab_size:
+                    if (target_tokens >= self.vocab_size).any():
                         continue
 
                 yield (
                     torch.tensor(input_tokens, dtype=torch.long),
-                    torch.tensor(target_token, dtype=torch.long),
+                    torch.tensor(target_tokens, dtype=torch.long),
                 )
 
-            del chunk  # chunk belleği serbest bırak
+            del chunk
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +249,7 @@ class ChunkedBinaryTokenDataset(IterableDataset):
 # ---------------------------------------------------------------------------
 
 class SimpleTransformer(nn.Module):
-    """Basit Transformer tabanlı LLM modeli"""
+    """Causal (GPT-style) Transformer dil modeli."""
 
     def __init__(
         self,
@@ -255,14 +263,13 @@ class SimpleTransformer(nn.Module):
         tie_weights: bool = True,
     ):
         super().__init__()
+        self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.context_length = context_length
 
-        # Embedding katmanları
         self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
         self.positional_embedding = nn.Embedding(context_length, embedding_dim)
 
-        # Transformer encoder katmanları
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embedding_dim,
             nhead=num_heads,
@@ -272,35 +279,41 @@ class SimpleTransformer(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
 
-        # Çıkış katmanı
         self.output_head = nn.Linear(embedding_dim, vocab_size)
         self.dropout = nn.Dropout(dropout)
 
-        # Ağırlık paylaşımı (Weight Tying)
         if tie_weights:
             self.output_head.weight = self.token_embedding.weight
+
+    def _causal_mask(self, seq_length: int, device: torch.device) -> torch.Tensor:
+        """Pozisyon i yalnızca j <= i tokenlarına bakabilir."""
+        return torch.triu(
+            torch.full((seq_length, seq_length), float("-inf"), device=device),
+            diagonal=1,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Şekli (batch_size, context_length) olan token ID'leri
+            x: (batch_size, seq_len) token ID'leri
 
         Returns:
-            Şekli (batch_size, vocab_size) olan logitler
+            (batch_size, seq_len, vocab_size) logitler — her pozisyon sonraki tokenı tahmin eder
         """
-        seq_length = x.size(1)
+        batch_size, seq_length = x.size()
+        if seq_length > self.context_length:
+            raise ValueError(
+                f"seq_len ({seq_length}) context_length ({self.context_length}) değerini aşıyor"
+            )
 
-        token_emb = self.token_embedding(x)           # (batch, seq_len, embedding_dim)
-
-        positions = torch.arange(
-            seq_length, dtype=torch.long, device=x.device
-        ).unsqueeze(0)
-        pos_emb = self.positional_embedding(positions)  # (1, seq_len, embedding_dim)
+        token_emb = self.token_embedding(x)
+        positions = torch.arange(seq_length, dtype=torch.long, device=x.device).unsqueeze(0)
+        pos_emb = self.positional_embedding(positions)
 
         embeddings = self.dropout(token_emb + pos_emb)
-        transformer_output = self.transformer_encoder(embeddings)
-        last_token_output = transformer_output[:, -1, :]
-        logits = self.output_head(last_token_output)   # (batch, vocab_size)
+        causal_mask = self._causal_mask(seq_length, x.device)
+        transformer_output = self.transformer_encoder(embeddings, mask=causal_mask)
+        logits = self.output_head(transformer_output)
 
         return logits
 
@@ -563,15 +576,21 @@ def train(
                 if use_amp and device.type == "cuda":
                     with torch.autocast(device_type="cuda", dtype=amp_dtype):
                         logits = model(input_ids)
-                        loss   = criterion(logits, target_ids)
-                        loss   = loss / grad_accum
+                        loss = criterion(
+                            logits.reshape(-1, logits.size(-1)),
+                            target_ids.reshape(-1),
+                        )
+                        loss = loss / grad_accum
                     if scaler is not None:
                         scaler.scale(loss).backward()
                     else:
                         loss.backward()
                 else:
                     logits = model(input_ids)
-                    loss   = criterion(logits, target_ids) / grad_accum
+                    loss = criterion(
+                        logits.reshape(-1, logits.size(-1)),
+                        target_ids.reshape(-1),
+                    ) / grad_accum
                     loss.backward()
 
                 raw_loss     = loss.item() * grad_accum
@@ -603,9 +622,10 @@ def train(
                     if log_every and global_step % log_every == 0:
                         avg = accum_loss / max(accum_count, 1)
                         lr  = optimizer.param_groups[0]["lr"]
+                        ppl = math.exp(min(avg, 20.0))
                         logger.info(
                             f"step={global_step:>8d}  epoch={epoch}  "
-                            f"loss={avg:.4f}  lr={lr:.2e}"
+                            f"loss={avg:.4f}  ppl={ppl:.1f}  lr={lr:.2e}"
                         )
                         accum_loss  = 0.0
                         accum_count = 0
@@ -697,6 +717,22 @@ def get_vocab_size(tokenizer_path: Path) -> int:
     """Tokenizer'dan vocab boyutunu al"""
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
     return tokenizer.get_vocab_size()
+
+
+def estimate_training_steps(
+    dataset: ChunkedBinaryTokenDataset,
+    batch_size: int,
+    grad_accum: int,
+    epochs: int,
+) -> int:
+    """Veri seti boyutuna göre toplam optimizer adımını tahmin et."""
+    total_bytes = sum(f.stat().st_size for f in dataset.bin_files)
+    total_tokens = total_bytes // dataset.token_size_bytes
+    tokens_per_example = dataset.context_length + 1
+    examples_per_epoch = max(1, total_tokens // tokens_per_example)
+    batches_per_epoch = max(1, examples_per_epoch // batch_size)
+    steps_per_epoch = max(1, math.ceil(batches_per_epoch / grad_accum))
+    return steps_per_epoch * epochs
 
 
 # ---------------------------------------------------------------------------
@@ -903,8 +939,13 @@ def main():
     )
 
     # ------ Scheduler ------
-    # total_steps tahmini (veri boyutu bilinmediği için warmup_steps × 100 kullan)
-    estimated_total_steps = max(args.warmup_steps * 100, 100_000)
+    estimated_total_steps = estimate_training_steps(
+        dataset,
+        batch_size=args.batch_size,
+        grad_accum=args.gradient_accumulation_steps,
+        epochs=args.epochs,
+    )
+    logger.info(f"Tahmini toplam optimizer adımı: {estimated_total_steps:,}")
     scheduler = get_warmup_cosine_scheduler(
         optimizer,
         warmup_steps=args.warmup_steps,
