@@ -11,6 +11,14 @@ Requirements: tokenizers (huggingface), psutil
 
 Usage example:
   python build_tokenizer.py --vocab-size 131072 --min-frequency 5 --lowercase --input-dir "F:/My App/ai/data/all_txt" --output-dir "." --log-file "./tokenizer_training.log" --checkpoint-file "./tokenizer_checkpoint.txt"
+  python build_tokenizer.py \
+  --vocab-size 131072 \
+  --min-frequency 25 \
+  --lowercase \
+  --input-dir "/mnt/disc2/all_txt" \
+  --output-dir "." \
+  --log-file "./tokenizer_training.log" \
+  --memory-log-interval 30
 
 notlar
 * 300 Gb txt veri için çalıştığında 65335 vocab_size için 90GB bellek kullanımı oluştu
