@@ -14,9 +14,9 @@ Usage example:
   python build_tokenizer.py --vocab-size 131072 --min-frequency 25 --lowercase \
     --input-dir "/mnt/disc2/all_txt" --output-dir "." --log-file "./tokenizer_training.log"
 
-  # 300GB+ corpus: temsil örnekleme ile (BPE için genelde 30-50GB yeterli)
+  # 300GB+ corpus: otomatik ~50GB örnek (varsayılan) veya açıkça belirtin:
   python build_tokenizer.py --vocab-size 131072 --min-frequency 25 --lowercase \
-    --input-dir "/mnt/disc2/all_txt" --max-bytes 50000000000
+    --input-dir "/mnt/disc2/all_txt" --max-bytes 50000000000 --shuffle-files
 
 notlar
 * 300 Gb txt veri için çalıştığında 65335 vocab_size için 90GB bellek kullanımı oluştu
@@ -59,8 +59,9 @@ SPECIAL_TOKENS = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[SOS]", "[EOS]"
 
 # train_from_iterator ile yaklaşık bu boyutun üzerinde bellek patlaması riski yüksek
 ITERATOR_MODE_WARN_BYTES = 10 * 1024 ** 3
-# Dosya modunda bile çok büyük corpus'ta frekans tablosu şişebilir
-FILE_MODE_WARN_BYTES = 80 * 1024 ** 3
+# Bu boyutun üzerindeki corpus'ta otomatik örnekleme uygulanır (--allow-full-corpus hariç)
+AUTO_SAMPLE_TRIGGER_BYTES = 80 * 1024 ** 3
+DEFAULT_AUTO_SAMPLE_GB = 50.0
 
 
 def _bytes_to_human(num_bytes: int) -> str:
@@ -156,6 +157,12 @@ def get_available_memory_bytes() -> Optional[int]:
     return psutil.virtual_memory().available
 
 
+def get_process_rss_bytes() -> Optional[int]:
+    if psutil is None:
+        return None
+    return psutil.Process(os.getpid()).memory_info().rss
+
+
 def check_memory_abort(log_file, min_available_gb: float, label: str) -> None:
     """Kritik bellek düşüşünde kontrollü çıkış (OOM killer'dan önce log bırak)."""
     available = get_available_memory_bytes()
@@ -238,12 +245,14 @@ class MemoryMonitor:
         log_file,
         interval_sec: int = 60,
         phase_label: str = "monitor",
-        min_available_gb: float = 10.0,
+        min_available_gb: float = 20.0,
+        max_process_rss_gb: float = 80.0,
     ):
         self.log_file = log_file
         self.interval_sec = interval_sec
         self.phase_label = phase_label
         self.min_available_gb = min_available_gb
+        self.max_process_rss_gb = max_process_rss_gb
         self._thread = None
         self._error = None
         self._error_lock = threading.Lock()
@@ -256,7 +265,7 @@ class MemoryMonitor:
         log_line(
             self.log_file,
             f"Bellek izleme başladı: phase={self.phase_label}, interval={self.interval_sec}s, "
-            f"min_available_gb={self.min_available_gb}",
+            f"min_available_gb={self.min_available_gb}, max_process_rss_gb={self.max_process_rss_gb}",
         )
 
     def stop(self):
@@ -280,15 +289,27 @@ class MemoryMonitor:
             try:
                 log_memory(self.log_file, f"{self.phase_label} tick={tick}")
                 available = get_available_memory_bytes()
+                rss = get_process_rss_bytes()
                 if available is not None and available < int(self.min_available_gb * 1024 ** 3):
                     msg = (
-                        f"Bellek izleme: available={_bytes_to_human(available)} "
-                        f"< eşik {self.min_available_gb:.1f} GB"
+                        f"Bellek izleme: system_available={_bytes_to_human(available)} "
+                        f"< eşik {self.min_available_gb:.1f} GB (OOM killer önleniyor)"
                     )
                     with self._error_lock:
                         self._error = MemoryError(msg)
                     _write_fatal_log(msg)
-                    log_memory(self.log_file, "Bellek izleme — kritik eşik")
+                    log_memory(self.log_file, "Bellek izleme — düşük system_available")
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return
+                if rss is not None and rss > int(self.max_process_rss_gb * 1024 ** 3):
+                    msg = (
+                        f"Bellek izleme: process_rss={_bytes_to_human(rss)} "
+                        f"> eşik {self.max_process_rss_gb:.1f} GB (OOM killer önleniyor)"
+                    )
+                    with self._error_lock:
+                        self._error = MemoryError(msg)
+                    _write_fatal_log(msg)
+                    log_memory(self.log_file, "Bellek izleme — yüksek process_rss")
                     os.kill(os.getpid(), signal.SIGTERM)
                     return
             except Exception as exc:
@@ -351,6 +372,67 @@ def select_training_files(
         log_line(log_file, f"Eğitim dosyası sayısı: {len(selected)}")
 
     return selected
+
+
+def resolve_training_limits(args, total_disk_bytes: int, log_file):
+    """
+  Eğitim örnekleme limitlerini belirle.
+  80GB+ corpus'ta varsayılan olarak ~50GB örnek + shuffle uygulanır.
+  """
+    max_bytes = args.max_bytes
+    shuffle = args.shuffle_files
+    auto_sampled = False
+
+    log_line(log_file, f"Komut satırı (sys.argv): {sys.argv!r}")
+
+    if args.allow_full_corpus:
+        if total_disk_bytes > AUTO_SAMPLE_TRIGGER_BYTES:
+            log_line(
+                log_file,
+                f"UYARI: --allow-full-corpus ile tam corpus (~{_bytes_to_human(total_disk_bytes)}) "
+                f"kullanılıyor. BPE frekans tablosu 100GB+ RAM tüketebilir.",
+            )
+        return max_bytes, shuffle, auto_sampled
+
+    if max_bytes is None and total_disk_bytes > AUTO_SAMPLE_TRIGGER_BYTES:
+        max_bytes = int(args.auto_sample_gb * 1024 ** 3)
+        shuffle = True
+        auto_sampled = True
+        log_line(
+            log_file,
+            f"OTOMATİK ÖRNEKLEME: corpus ~{_bytes_to_human(total_disk_bytes)} > "
+            f"{_bytes_to_human(AUTO_SAMPLE_TRIGGER_BYTES)}. "
+            f"max_bytes={max_bytes:,} (~{args.auto_sample_gb} GB) ve shuffle_files=True uygulandı. "
+            f"Tam corpus için bilinçli olarak --allow-full-corpus kullanın.",
+        )
+    elif max_bytes is not None and not shuffle:
+        log_line(
+            log_file,
+            "UYARI: --max-bytes verildi ama --shuffle-files yok. "
+            "Dosyalar klasör sırasına göre seçilir; temsil için --shuffle-files önerilir.",
+        )
+
+    return max_bytes, shuffle, auto_sampled
+
+
+def write_training_manifest(file_paths, output_dir: str, log_file) -> Path:
+    manifest_path = Path(output_dir) / "tokenizer_training_files.txt"
+    total_bytes = estimate_files_bytes(file_paths)
+    with manifest_path.open("w", encoding="utf-8") as mf:
+        mf.write(f"# file_count={len(file_paths)}\n")
+        mf.write(f"# total_bytes={total_bytes}\n")
+        for path in file_paths:
+            mf.write(f"{path}\n")
+    log_line(
+        log_file,
+        f"Seçilen {len(file_paths)} dosya listesi yazıldı: {manifest_path} (~{_bytes_to_human(total_bytes)})",
+    )
+    if file_paths:
+        preview = file_paths[:3]
+        log_line(log_file, "İlk dosyalar: " + " | ".join(preview))
+        if len(file_paths) > 3:
+            log_line(log_file, "Son dosya: " + file_paths[-1])
+    return manifest_path
 
 
 def build_normalizer(lowercase: bool):
@@ -474,7 +556,8 @@ def build_and_save_tokenizer_from_files(
     lowercase: bool,
     log_file=None,
     memory_log_interval: int = 60,
-    min_available_gb: float = 10.0,
+    min_available_gb: float = 20.0,
+    max_process_rss_gb: float = 80.0,
 ):
     monitor = None
     if log_file is not None:
@@ -486,7 +569,8 @@ def build_and_save_tokenizer_from_files(
         log_memory(log_file, "BPE eğitimi öncesi (files)")
         log_line(
             log_file,
-            "tokenizer.train(files) kullanılıyor — corpus satırları Python belleğine yüklenmez.",
+            "tokenizer.train(files) kullanılıyor — satırlar Python belleğine yüklenmez; "
+            "ancak BPE frekans tablosu corpus boyutuyla büyür (örnekleme şart).",
         )
 
     tokenizer, trainer = create_tokenizer_and_trainer(vocab_size, min_frequency, lowercase)
@@ -498,6 +582,7 @@ def build_and_save_tokenizer_from_files(
                 interval_sec=memory_log_interval,
                 phase_label="BPE eğitimi (files)",
                 min_available_gb=min_available_gb,
+                max_process_rss_gb=max_process_rss_gb,
             )
             monitor.start()
 
@@ -543,7 +628,8 @@ def build_and_save_tokenizer_from_iterator(
     lowercase: bool,
     log_file=None,
     memory_log_interval: int = 60,
-    min_available_gb: float = 10.0,
+    min_available_gb: float = 20.0,
+    max_process_rss_gb: float = 80.0,
 ):
     monitor = None
     if log_file is not None:
@@ -568,6 +654,7 @@ def build_and_save_tokenizer_from_iterator(
                 interval_sec=memory_log_interval,
                 phase_label="BPE eğitimi (iterator)",
                 min_available_gb=min_available_gb,
+                max_process_rss_gb=max_process_rss_gb,
             )
             monitor.start()
 
@@ -648,8 +735,25 @@ def main():
     parser.add_argument(
         "--min-available-gb",
         type=float,
-        default=10.0,
+        default=20.0,
         help="Sistem boş belleği bu GB altına düşerse işlemi durdur (OOM killer öncesi).",
+    )
+    parser.add_argument(
+        "--max-process-rss-gb",
+        type=float,
+        default=80.0,
+        help="İşlem RSS bu GB üzerine çıkarsa durdur (OOM killer öncesi).",
+    )
+    parser.add_argument(
+        "--auto-sample-gb",
+        type=float,
+        default=DEFAULT_AUTO_SAMPLE_GB,
+        help=f"80GB+ corpus'ta otomatik örnekleme boyutu (GB). Varsayılan: {DEFAULT_AUTO_SAMPLE_GB}",
+    )
+    parser.add_argument(
+        "--allow-full-corpus",
+        action="store_true",
+        help="Otomatik örneklemeyi kapat; tüm corpus ile BPE eğit (yüksek OOM riski).",
     )
     args = parser.parse_args()
 
@@ -678,7 +782,10 @@ def main():
             log_file,
             f"Parametreler: input_dir={input_dir} output_dir={output_dir} vocab_size={args.vocab_size} "
             f"min_frequency={args.min_frequency} lowercase={args.lowercase} train_mode={train_mode} "
-            f"memory_log_interval={args.memory_log_interval}s min_available_gb={args.min_available_gb}",
+            f"max_bytes={args.max_bytes} shuffle_files={args.shuffle_files} "
+            f"auto_sample_gb={args.auto_sample_gb} allow_full_corpus={args.allow_full_corpus} "
+            f"memory_log_interval={args.memory_log_interval}s "
+            f"min_available_gb={args.min_available_gb} max_process_rss_gb={args.max_process_rss_gb}",
         )
 
         files = list(find_txt_files(input_dir))
@@ -689,30 +796,36 @@ def main():
         total_disk_bytes = estimate_files_bytes(files)
         log_line(log_file, f"Found {len(files)} .txt files (~{_bytes_to_human(total_disk_bytes)} on disk)")
         log_memory(log_file, "Dosya listesi hazır")
+
+        effective_max_bytes, effective_shuffle, auto_sampled = resolve_training_limits(
+            args, total_disk_bytes, log_file
+        )
         log_line(
             log_file,
-            "Training limits: max_files=%s max_lines=%s max_bytes=%s shuffle_files=%s"
-            % (args.max_files, args.max_lines, args.max_bytes, args.shuffle_files),
+            "Etkin limitler: max_files=%s max_lines=%s max_bytes=%s shuffle_files=%s auto_sampled=%s"
+            % (args.max_files, args.max_lines, effective_max_bytes, effective_shuffle, auto_sampled),
         )
 
         if train_mode == "files":
             training_files = select_training_files(
                 files,
                 max_files=args.max_files,
-                max_bytes=args.max_bytes,
-                shuffle=args.shuffle_files,
+                max_bytes=effective_max_bytes,
+                shuffle=effective_shuffle,
                 seed=args.shuffle_seed,
                 log_file=log_file,
             )
             selected_bytes = estimate_files_bytes(training_files)
-            log_line(log_file, f"Seçilen eğitim verisi: {len(training_files)} dosya, ~{_bytes_to_human(selected_bytes)}")
+            log_line(
+                log_file,
+                f"Seçilen eğitim verisi: {len(training_files)} dosya, ~{_bytes_to_human(selected_bytes)}",
+            )
+            write_training_manifest(training_files, output_dir, log_file)
 
-            if selected_bytes > FILE_MODE_WARN_BYTES and args.max_bytes is None:
-                log_line(
-                    log_file,
-                    f"UYARI: Seçilen veri ~{_bytes_to_human(selected_bytes)}. "
-                    f"BPE frekans tablosu büyüyebilir. Öneri: --max-bytes 50000000000 --shuffle-files "
-                    f"(30-50GB örnek BPE için genelde yeterlidir).",
+            if selected_bytes > AUTO_SAMPLE_TRIGGER_BYTES and not args.allow_full_corpus:
+                raise MemoryError(
+                    f"Seçilen veri hâlâ ~{_bytes_to_human(selected_bytes)}. "
+                    f"--max-bytes veya daha düşük --auto-sample-gb kullanın."
                 )
 
             if args.lowercase:
@@ -731,6 +844,7 @@ def main():
                 log_file=log_file,
                 memory_log_interval=args.memory_log_interval,
                 min_available_gb=args.min_available_gb,
+                max_process_rss_gb=args.max_process_rss_gb,
             )
         else:
             if args.max_lines is None and args.max_bytes is None and total_disk_bytes > ITERATOR_MODE_WARN_BYTES:
@@ -769,6 +883,7 @@ def main():
                 log_file=log_file,
                 memory_log_interval=args.memory_log_interval,
                 min_available_gb=args.min_available_gb,
+                max_process_rss_gb=args.max_process_rss_gb,
             )
 
         log_line(log_file, f"Tokenizer saved to: {out_path}")
