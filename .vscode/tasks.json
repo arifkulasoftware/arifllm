@@ -1,0 +1,54 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "fpc: build debug (build_tokenizer)",
+      "type": "shell",
+      "command": "fpc",
+      "args": [
+        "-g",
+        "-gl",
+        "-O1",
+        "-Fubin",
+        "-FUbin",
+        "build_tokenizer.pas"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/tokenleştirme/pascal"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": {
+        "owner": "fpc",
+        "fileLocation": ["relative", "${workspaceFolder}/tokenleştirme/pascal"],
+        "pattern": {
+          "regexp": "^(.*)\\((\\d+),(\\d+)\\)\\s+(Error|Warning|Note):\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        }
+      }
+    },
+    {
+      "label": "fpc: build release (build_tokenizer)",
+      "type": "shell",
+      "command": "fpc",
+      "args": [
+        "-O3",
+        "-CX",
+        "-XX",
+        "-Fubin",
+        "-FUbin",
+        "build_tokenizer.pas"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/tokenleştirme/pascal"
+      },
+      "problemMatcher": "$fpc"
+    }
+  ]
+}

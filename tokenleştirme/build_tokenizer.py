@@ -245,7 +245,7 @@ class MemoryMonitor:
         log_file,
         interval_sec: int = 60,
         phase_label: str = "monitor",
-        min_available_gb: float = 20.0,
+        min_available_gb: float = 0.25,
         max_process_rss_gb: float = 80.0,
     ):
         self.log_file = log_file
@@ -556,7 +556,7 @@ def build_and_save_tokenizer_from_files(
     lowercase: bool,
     log_file=None,
     memory_log_interval: int = 60,
-    min_available_gb: float = 20.0,
+    min_available_gb: float = 0.25,
     max_process_rss_gb: float = 80.0,
 ):
     monitor = None
@@ -628,7 +628,7 @@ def build_and_save_tokenizer_from_iterator(
     lowercase: bool,
     log_file=None,
     memory_log_interval: int = 60,
-    min_available_gb: float = 20.0,
+    min_available_gb: float = 0.25,
     max_process_rss_gb: float = 80.0,
 ):
     monitor = None
@@ -735,7 +735,7 @@ def main():
     parser.add_argument(
         "--min-available-gb",
         type=float,
-        default=20.0,
+        default=0.25,
         help="Sistem boş belleği bu GB altına düşerse işlemi durdur (OOM killer öncesi).",
     )
     parser.add_argument(

@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Pascal: build_tokenizer (debug)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/tokenleştirme/pascal/bin/build_tokenizer",
+      "args": [
+        "--input-dir",
+        "./all_txt/",
+        "--pattern",
+        "dosya1.txt"
+      ],
+      "cwd": "${workspaceFolder}/tokenleştirme/pascal/bin",
+      "preLaunchTask": "fpc: build debug (build_tokenizer)",
+      "terminal": "integrated"
+    },
+    {
+      "name": "Pascal: build_tokenizer (c4 dosyasi)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/tokenleştirme/pascal/bin/build_tokenizer",
+      "args": [
+        "--input-dir",
+        "./all_txt/",
+        "--pattern",
+        "c4-tr.tfrecord-00000-of-01024.json.txt"
+      ],
+      "cwd": "${workspaceFolder}/tokenleştirme/pascal/bin",
+      "preLaunchTask": "fpc: build debug (build_tokenizer)",
+      "terminal": "integrated"
+    }
+  ]
+}
