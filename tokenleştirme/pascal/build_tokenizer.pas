@@ -9,18 +9,25 @@
 program build_tokenizer;
 
 uses
+{$ifdef unix}
+  cmem, // the c memory manager is on some systems much faster for multi-threading
+  cthreads,
+{$endif}
   SysUtils,
   Classes;
 
 var
-  DataDir: string;
-  FilePattern: string;
+  DataDir : string;
+  FilePattern : string;
+  MaxThreads : Integer;
+  ThreadCount : Integer = 0;
 
 procedure kullanim_talimatlari;
 begin
   Writeln('Kullanim: build_tokenizer [secenekler]');
   Writeln('  --input-dir <dizin>     Varsayilan: ./all_txt/');
   Writeln('  --pattern <glob>        Varsayilan: c4*.txt');
+  Writeln('  --max-threads <N>       Varsayilan: CPU cekirdek sayisi (', GetCPUCount, ')');
   Writeln('  --help                  Bu mesaj');
 end;
 
@@ -29,8 +36,8 @@ var
   I: Integer;
 begin
   DataDir := './all_txt/';
-  FilePattern := 'c4*.txt';
-
+  FilePattern := '*.txt';
+  MaxThreads := GetCPUCount;
   I := 1;
   while I <= ParamCount do
   begin
@@ -52,6 +59,15 @@ begin
       if I > ParamCount then
         raise Exception.Create('--pattern degeri gerekli');
       FilePattern := ParamStr(I);
+    end
+    else if ParamStr(I) = '--max-threads' then
+    begin
+      Inc(I);
+      if I > ParamCount then
+        raise Exception.Create('--max-threads degeri gerekli');
+      MaxThreads := StrToIntDef(ParamStr(I), 1);
+      if MaxThreads < 1 then
+        raise Exception.Create('--max-threads en az 1 olmali');
     end
     else
       raise Exception.Create('Bilinmeyen arguman: ' + ParamStr(I));
@@ -190,6 +206,37 @@ begin
   CloseFile(lFl);
 end;
 
+  Type
+    TMyThread = class(TThread)
+    private
+      FFileName : String ;
+    protected
+      procedure Execute; override;
+    public
+      Constructor Create(pFileName : String );
+      Destructor Destroy; override;
+    end;
+
+  constructor TMyThread.Create(pFileName : String );
+  begin
+    Inc(ThreadCount);
+    inherited Create(false);
+    FreeOnTerminate := True;
+    FFileName:=pFileName;
+  end;
+
+  destructor TMyThread.Destroy;
+  begin
+    Dec(ThreadCount);
+    inherited Destroy;
+  end;
+
+procedure TMyThread.Execute;
+
+ begin
+  Dosya_Oku(FFileName);
+ End;
+
 var
   Sr: TSearchRec;
   Er: Integer;
@@ -205,11 +252,16 @@ begin
   Er := FindFirst(DataDir + FilePattern, faAnyFile, Sr);
   while Er = 0 do
   begin
-    Writeln('Processing: ', Sr.Name);
-    Dosya_Oku(DataDir + Sr.Name);
+    While ThreadCount >= MaxThreads do
+      Sleep(1);
+    Writeln('ThreadCount: ', ThreadCount);
+    Writeln('Processing: ', Sr.Name);    
+    TMyThread.Create(DataDir + Sr.Name);
     Er := FindNext(Sr);
   end;
   FindClose(Sr);
+  While ThreadCount > 0 do
+    Sleep(1);
   T1 := GetTickCount64;
 
   Writeln;
