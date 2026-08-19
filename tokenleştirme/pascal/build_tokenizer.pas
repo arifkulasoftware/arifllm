@@ -1,17 +1,20 @@
 {$mode objfpc}{$H+}
-{$OPTIMIZATION ON}
-{$ASSERTIONS OFF}
+{$IFDEF DEBUG}
+  {$OPTIMIZATION OFF}
+  {$ASSERTIONS ON}
+{$ELSE}
+  {$OPTIMIZATION ON}
+  {$ASSERTIONS OFF}
+{$ENDIF}
 program build_tokenizer;
 
 uses
   SysUtils,
   Classes;
 
-
 var
   DataDir: string;
-  FilePattern: string;  
-  
+  FilePattern: string;
 
 procedure kullanim_talimatlari;
 begin
@@ -56,102 +59,134 @@ begin
   end;
 end;
 
-(*
-pC in ['.' , '!' , '?' , '-' , '_' , '/' , '(' , ')' , '[' , ']' , '{' , '}' , '<' , '>' , '|' 
-            ,'\' , '@' , '#' , '$' , '%' , '^' , '&' , '*' , '+' , '=' , '~' , '`' , '''' , ',' ,
-            ';' , ':' , '"']
-*)
-
-Function turkcele(var pBuf: PByte; var pPs: Int64):WideChar;
-var
-  O : Byte ;
-  pW : PWord ;
-  W : Word ;
-
+procedure Token_Ekle(const pToken: PByte; pLen: Int64); inline;
+ var S: string;
 begin
-  O:=pBuf[pPs];
-  Inc(pPs);
-  if (O >= 97) and (O <= 122) then // a-z
-    Begin Result:=Char(O); Exit; End; 
-  if (O >= 65) and (O <= 90) and (O <> 73) then // A-Z, I hariç
-    Begin Result:=Char(O+32); Exit; End; 
-  if (O >= 48) and (O <= 57) then  
-    Begin Result:=Char(O); Exit; End; 
-  if O=73 then  
-    Begin Result:=WideChar($0131); Exit; End; 
-  if O<=127 then  
-    Begin Result:=' '; Exit; End; 
-
-  Inc(pPs);  
-  pW:=PWord(pBuf);  
-  W:=pW[pPs-2];
-  Case W of
-    $0131, // ı
-    $011F, // ğ
-    $015F, // ş
-    $00E7, // ç
-    $00F6, // ö
-    $00FC : Begin Result:=WideChar(W); Exit; End;  // return pC
-  end;
-
-  case W of
-    $0130: Result := 'i';  // İ -> i
-    $011E: Result := WideChar($011F);  // Ğ -> ğ
-    $015E: Result := WideChar($015F);  // Ş -> ş
-    $00C7: Result := WideChar($00E7);  // Ç -> ç
-    $00D6: Result := WideChar($00F6);  // Ö -> ö
-    $00DC: Result := WideChar($00FC);  // Ü -> ü
-  end;
-
-  //While pBuf[pPs]>127 do inc(pPs);
-
-  Result:=' ';
+  if pLen <= 0 then
+    Exit;
+  SetLength(S, pLen);
+  Move(pToken^, S[1], pLen);
+  // Writeln(S);
 end;
 
-procedure Token_Ekle(pToken: WideString);
-begin
-  Writeln(pToken);
-end;
-
-procedure Bufer_isle(var pBuf: PByte ; pSize: Int64);
-
+procedure Bufer_isle(pBuf: PByte; pSize: Int64);
 var
-  lPs : Int64 ;
-  lW : WideChar;
-  lWord : WideString;
-
+  pEnd: PByte;
+  pWordStart: PByte;
+  B, B2: Byte;
+  pW: PByte;
 begin
-  lWord:='';
-  lPs:=0;
-  while lPs < pSize do
+  pEnd := pBuf + pSize;
+  pWordStart := pBuf;
+  pW := pBuf;
+
+  while pBuf < pEnd do
   begin
-    lW:=turkcele(pBuf,lPs);
-    if lW<>' ' then
-      lWord:=lWord+lW
-       else begin      
-        Token_Ekle(lWord);
-        lWord:='';
+    B := pBuf^;
+
+    if B <= 127 then
+    begin
+      if (B >= 97) and (B <= 122) then          // a-z
+      begin
+        pW^ := B;
+        Inc(pW);
+      end
+      else if (B >= 65) and (B <= 90) then       // A-Z
+      begin
+        if B = 73 then                            // I -> ı (C4 B1)
+        begin
+          pW^ := $C4; Inc(pW);
+          pW^ := $B1; Inc(pW);
+        end
+        else
+        begin
+          pW^ := B + 32;
+          Inc(pW);
+        end;
+      end
+      else if (B >= 48) and (B <= 57) then       // 0-9
+      begin
+        pW^ := B;
+        Inc(pW);
+      end
+      else                                        // bosluk/noktalama -> token siniri
+      begin
+        if pW > pWordStart then
+          Token_Ekle(pWordStart, pW - pWordStart);
+        Inc(pBuf);
+        pWordStart := pW;
+        Continue;
       end;
-  end;  
+      Inc(pBuf);
+    end
+    else
+    begin
+      { UTF-8 2-byte: 110xxxxx 10xxxxxx }
+      if pBuf + 1 >= pEnd then
+      begin
+        Inc(pBuf);
+        Continue;
+      end;
+      B2 := (pBuf + 1)^;
+      case B of
+        $C3: case B2 of
+               $87: begin pW^ := $C3; Inc(pW); pW^ := $A7; Inc(pW); end;  // Ç -> ç
+               $96: begin pW^ := $C3; Inc(pW); pW^ := $B6; Inc(pW); end;  // Ö -> ö
+               $9C: begin pW^ := $C3; Inc(pW); pW^ := $BC; Inc(pW); end;  // Ü -> ü
+               $A7: begin pW^ := $C3; Inc(pW); pW^ := $A7; Inc(pW); end;  // ç
+               $B6: begin pW^ := $C3; Inc(pW); pW^ := $B6; Inc(pW); end;  // ö
+               $BC: begin pW^ := $C3; Inc(pW); pW^ := $BC; Inc(pW); end;  // ü
+             else
+               Inc(pBuf, 2);
+               Continue;
+             end;
+        $C4: case B2 of
+               $B0: begin pW^ := $69; Inc(pW); end;                       // İ -> i
+               $B1: begin pW^ := $C4; Inc(pW); pW^ := $B1; Inc(pW); end;  // ı
+               $9E: begin pW^ := $C4; Inc(pW); pW^ := $9F; Inc(pW); end;  // Ğ -> ğ
+               $9F: begin pW^ := $C4; Inc(pW); pW^ := $9F; Inc(pW); end;  // ğ
+             else
+               Inc(pBuf, 2);
+               Continue;
+             end;
+        $C5: case B2 of
+               $9E: begin pW^ := $C5; Inc(pW); pW^ := $9F; Inc(pW); end;  // Ş -> ş
+               $9F: begin pW^ := $C5; Inc(pW); pW^ := $9F; Inc(pW); end;  // ş
+             else
+               Inc(pBuf, 2);
+               Continue;
+             end;
+      else
+        if B >= $E0 then
+          Inc(pBuf, 3)
+        else
+          Inc(pBuf, 2);
+        Continue;
+      end;
+      Inc(pBuf, 2);
+    end;
+  end;
+
+  if pW > pWordStart then
+    Token_Ekle(pWordStart, pW - pWordStart);
 end;
 
-procedure Dosya_Oku(const pFileName: string); 
- var
-  lFl : File of Byte;
-  lFSize,lReadCount : Int64;
-  lBuf : PByte ;
-
+procedure Dosya_Oku(const pFileName: string);
+var
+  lFl: File of Byte;
+  lFSize: Int64;
+  lBuf: PByte;
 begin
   AssignFile(lFl, pFileName);
-  Reset(lFl);   
-  lFSize:=FileSize(lFl);
-  GetMem(lBuf, lFSize);
+  Reset(lFl);
+  lFSize := FileSize(lFl);
+  GetMem(lBuf, lFSize + 1);
   try
-    BlockRead(lFl, lBuf^, lFSize, lReadCount);
-    Bufer_isle(lBuf , lReadCount);  
+    BlockRead(lFl, lBuf^, lFSize);
+    Bufer_isle(lBuf, lFSize);
   finally
     FreeMem(lBuf);
-  end;  
+  end;
   CloseFile(lFl);
 end;
 
@@ -166,21 +201,20 @@ begin
   Writeln('  input-dir : ', DataDir);
   Writeln('  pattern   : ', FilePattern);
 
-    T0 := GetTickCount64;
-    Er := FindFirst(DataDir + FilePattern, faAnyFile, Sr);
-    while Er = 0 do
-    begin
-      Writeln('Processing: ', Sr.Name);
-      Dosya_Oku(DataDir + Sr.Name);
-      Er := FindNext(Sr);
-    end;
-    FindClose(Sr);
-    T1 := GetTickCount64;
+  T0 := GetTickCount64;
+  Er := FindFirst(DataDir + FilePattern, faAnyFile, Sr);
+  while Er = 0 do
+  begin
+    Writeln('Processing: ', Sr.Name);
+    Dosya_Oku(DataDir + Sr.Name);
+    Er := FindNext(Sr);
+  end;
+  FindClose(Sr);
+  T1 := GetTickCount64;
 
-    Writeln;
-    Writeln('=== Ozet ===');
-    Writeln('  Sure (sn)        : ', (T1 - T0) / 1000.0:0:2);
-
+  Writeln;
+  Writeln('=== Ozet ===');
+  Writeln('  Sure (sn)        : ', (T1 - T0) / 1000.0:0:2);
 
   Writeln('build tokenizer finished.');
 end.

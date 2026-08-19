@@ -4,15 +4,7 @@
     {
       "label": "fpc: build debug (build_tokenizer)",
       "type": "shell",
-      "command": "fpc",
-      "args": [
-        "-g",
-        "-gl",
-        "-O1",
-        "-Fubin",
-        "-FUbin",
-        "build_tokenizer.pas"
-      ],
+      "command": "fpc -g -gl -gw2 -O- -dDEBUG -FEbin -FUbin build_tokenizer.pas && dsymutil bin/build_tokenizer",
       "options": {
         "cwd": "${workspaceFolder}/tokenleştirme/pascal"
       },
@@ -41,7 +33,7 @@
         "-O3",
         "-CX",
         "-XX",
-        "-Fubin",
+        "-FEbin",
         "-FUbin",
         "build_tokenizer.pas"
       ],

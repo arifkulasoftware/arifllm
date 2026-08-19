@@ -14,6 +14,7 @@
       ],
       "cwd": "${workspaceFolder}/tokenleştirme/pascal/bin",
       "preLaunchTask": "fpc: build debug (build_tokenizer)",
+      "stopOnEntry": false,
       "terminal": "integrated"
     },
     {
