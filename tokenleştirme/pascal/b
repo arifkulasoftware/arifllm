@@ -1,1 +1,5 @@
+cd ~/Repos/arifllm/tokenleştirme/pascal
 fpc -O3 -CX -XX build_tokenizer.pas -FE./bin -FU./bin
+cd bin
+./build_tokenizer
+

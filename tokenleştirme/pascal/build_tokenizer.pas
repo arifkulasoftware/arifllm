@@ -65,23 +65,23 @@ begin
       Inc(I);
       if I > ParamCount then
         raise Exception.Create('--max-threads degeri gerekli');
-      MaxThreads := StrToIntDef(ParamStr(I), 1);
-      if MaxThreads < 1 then
-        raise Exception.Create('--max-threads en az 1 olmali');
+      MaxThreads := StrToIntDef(ParamStr(I), 1);      
     end
     else
       raise Exception.Create('Bilinmeyen arguman: ' + ParamStr(I));
     Inc(I);
   end;
+if MaxThreads < 1 then 
+  MaxThreads:=1;
 end;
 
 procedure Token_Ekle(const pToken: PByte; pLen: Int64); inline;
  var S: string;
 begin
   if pLen <= 0 then
-    Exit;
-  SetLength(S, pLen);
-  Move(pToken^, S[1], pLen);
+    Exit;     // 1.04sn 
+//  SetLength(S, pLen);  // 1.82sn
+  //Move(pToken^, S[1], pLen); // 2.12sn
   // Writeln(S);
 end;
 
@@ -183,7 +183,7 @@ begin
     end;
   end;
 
-  if pW > pWordStart then
+  if pW > pWordStart +1 then
     Token_Ekle(pWordStart, pW - pWordStart);
 end;
 
