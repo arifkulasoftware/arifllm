@@ -23,8 +23,19 @@ const
   INITIAL_ARENA   = 4 * 1024 * 1024;
   LOAD_FACTOR_NUM = 7;
   LOAD_FACTOR_DEN = 10;
+  SPECIAL_TOKEN_COUNT = 7;
+  DEFAULT_MAKSIMUM_TOKEN = 8192;
+  JSON_WRITE_BUF = 1024 * 1024;
 
 type
+  TTopEntry = record
+    KeyOff: Int32;
+    KeyLen: Int32;
+    Count: Int32;
+  end;
+
+  TTopEntryArray = array of TTopEntry;
+
   TTokenSlot = record
     Hash: QWord;
     KeyOff: Int32;
@@ -44,6 +55,7 @@ type
     FUniqueCount: QWord;
     FTotalTokens: QWord;
     function HashBytes(const p: PByte; Len: Int64): QWord;
+    function CollectAllEntries: TTopEntryArray;
     procedure EnsureArena(Need: Int64);
     procedure GrowBuckets;
     procedure MergeInsert(const pToken: PByte; pLen: Int64; Cnt: Int32);
@@ -53,6 +65,7 @@ type
     procedure IncOrInsert(const pToken: PByte; pLen: Int64);
     procedure MergeFrom(const Src: TTokenFreqTable);
     procedure PrintTop(N: Integer);
+    function SaveTokenizerJson(const Path: string; MaxVocab: Integer): Integer;
     property TotalTokens: QWord read FTotalTokens;
     property UniqueCount: QWord read FUniqueCount;
   end;
@@ -71,12 +84,142 @@ type
 var
   DataDir: string;
   FilePattern: string;
+  OutputDir: string;
   MaxThreads: Integer;
   MaxPrint: Integer;
+  MaksimumToken: Integer;
   ThreadCount: Integer = 0;
   GlobalFreq: TTokenFreqTable;
   FreqLock: TRTLCriticalSection;
   GThreadFreq: ^TTokenFreqTable = nil;
+
+function SpecialTokenText(Index: Integer): string;
+begin
+  case Index of
+    0: Result := '[PAD]';
+    1: Result := '[UNK]';
+    2: Result := '[CLS]';
+    3: Result := '[SEP]';
+    4: Result := '[MASK]';
+    5: Result := '[SOS]';
+    6: Result := '[EOS]';
+  else
+    Result := '';
+  end;
+end;
+
+procedure JsonEscapeAndWrite(const p: PByte; Len: Int64; out F: Text);
+var
+  I: Int64;
+  C: Byte;
+begin
+  for I := 0 to Len - 1 do
+  begin
+    C := PByte(PtrUInt(p) + PtrUInt(I))^;
+    case C of
+      Ord('"'): Write(F, '\"');
+      Ord('\'): Write(F, '\\');
+      Ord(#8): Write(F, '\b');
+      Ord(#12): Write(F, '\f');
+      Ord(#10): Write(F, '\n');
+      Ord(#13): Write(F, '\r');
+      Ord(#9): Write(F, '\t');
+    else
+      if C < 32 then
+        Write(F, '\u00', HexStr(C shr 4, 1), HexStr(C and $F, 1))
+      else
+        Write(F, Char(C));
+    end;
+  end;
+end;
+
+procedure HeapSiftDown(var Heap: array of TTopEntry; Root, HeapSize: Integer);
+var
+  Cur, Smallest, Left, Right: Integer;
+  Tmp: TTopEntry;
+begin
+  Cur := Root;
+  while True do
+  begin
+    Smallest := Cur;
+    Left := (Cur shl 1) + 1;
+    Right := Left + 1;
+    if (Left < HeapSize) and (Heap[Left].Count < Heap[Smallest].Count) then
+      Smallest := Left;
+    if (Right < HeapSize) and (Heap[Right].Count < Heap[Smallest].Count) then
+      Smallest := Right;
+    if Smallest = Cur then
+      Break;
+    Tmp := Heap[Cur];
+    Heap[Cur] := Heap[Smallest];
+    Heap[Smallest] := Tmp;
+    Cur := Smallest;
+  end;
+end;
+
+procedure TopKSelect(const Items: array of TTopEntry; ItemCount, K: Integer;
+  out Top: array of TTopEntry; out TopCount: Integer);
+var
+  Heap: array of TTopEntry;
+  HeapSize, I, J: Integer;
+  Tmp: TTopEntry;
+begin
+  TopCount := 0;
+  if (K <= 0) or (ItemCount <= 0) then
+    Exit;
+  if K > ItemCount then
+    K := ItemCount;
+
+  SetLength(Heap, K);
+  HeapSize := 0;
+  for I := 0 to ItemCount - 1 do
+  begin
+    if HeapSize < K then
+    begin
+      Heap[HeapSize] := Items[I];
+      Inc(HeapSize);
+      if HeapSize = K then
+        for J := (K div 2) - 1 downto 0 do
+          HeapSiftDown(Heap, J, HeapSize);
+    end
+    else if Items[I].Count > Heap[0].Count then
+    begin
+      Heap[0] := Items[I];
+      HeapSiftDown(Heap, 0, HeapSize);
+    end;
+  end;
+
+  TopCount := HeapSize;
+  for I := 0 to HeapSize - 1 do
+    Top[I] := Heap[I];
+
+  for I := 0 to TopCount - 2 do
+    for J := I + 1 to TopCount - 1 do
+      if Top[J].Count > Top[I].Count then
+      begin
+        Tmp := Top[I];
+        Top[I] := Top[J];
+        Top[J] := Tmp;
+      end;
+end;
+
+function TTokenFreqTable.CollectAllEntries: TTopEntryArray;
+var
+  I, N: Integer;
+begin
+  SetLength(Result, FUsedSlots);
+  N := 0;
+  for I := 0 to FBucketCount - 1 do
+  begin
+    if FBuckets[I].KeyLen = 0 then
+      Continue;
+    Result[N].KeyOff := FBuckets[I].KeyOff;
+    Result[N].KeyLen := FBuckets[I].KeyLen;
+    Result[N].Count := FBuckets[I].Count;
+    Inc(N);
+  end;
+  SetLength(Result, N);
+end;
 
 function TTokenFreqTable.HashBytes(const p: PByte; Len: Int64): QWord;
 var
@@ -86,7 +229,7 @@ begin
   Result := FNV_OFFSET;
   for I := 0 to Len - 1 do
   begin
-    B := PByte(Int64(p) + I)^;
+    B := PByte(PtrUInt(p) + PtrUInt(I))^;
     Result := Result xor B;
     Result := Result * FNV_PRIME;
   end;
@@ -234,52 +377,128 @@ begin
 end;
 
 procedure TTokenFreqTable.PrintTop(N: Integer);
-type
-  TTopEntry = record
-    KeyOff: Int32;
-    KeyLen: Int32;
-    Count: Int32;
-  end;
 var
-  Items: array of TTopEntry;
-  ItemCount, I, J: Integer;
+  AllItems: array of TTopEntry;
+  TopItems: array of TTopEntry;
+  TopCount, I: Integer;
   S: string;
-  Tmp: TTopEntry;
 begin
   if N <= 0 then
     Exit;
 
-  SetLength(Items, FUsedSlots);
-  ItemCount := 0;
-  for I := 0 to FBucketCount - 1 do
+  AllItems := CollectAllEntries;
+  SetLength(TopItems, N);
+  TopKSelect(AllItems, Length(AllItems), N, TopItems, TopCount);
+
+  Writeln('--- En sik ', TopCount, ' token ---');
+  for I := 0 to TopCount - 1 do
   begin
-    if FBuckets[I].KeyLen = 0 then
-      Continue;
-    Items[ItemCount].KeyOff := FBuckets[I].KeyOff;
-    Items[ItemCount].KeyLen := FBuckets[I].KeyLen;
-    Items[ItemCount].Count := FBuckets[I].Count;
-    Inc(ItemCount);
+    SetLength(S, TopItems[I].KeyLen);
+    if TopItems[I].KeyLen > 0 then
+      Move((FArena + TopItems[I].KeyOff)^, S[1], TopItems[I].KeyLen);
+    Writeln(I + 1, #9, S, #9, TopItems[I].Count);
   end;
+end;
 
-  for I := 0 to ItemCount - 2 do
-    for J := I + 1 to ItemCount - 1 do
-      if Items[J].Count > Items[I].Count then
-      begin
-        Tmp := Items[I];
-        Items[I] := Items[J];
-        Items[J] := Tmp;
-      end;
+function TTokenFreqTable.SaveTokenizerJson(const Path: string; MaxVocab: Integer): Integer;
+var
+  AllItems: array of TTopEntry;
+  TopItems: array of TTopEntry;
+  TopCount, WordSlots, VocabSize, I, TokenId: Integer;
+  F: Text;
+  Buf: array[0..JSON_WRITE_BUF - 1] of Char;
+begin
+  Result := 0;
+  if MaxVocab <= SPECIAL_TOKEN_COUNT then
+    Exit;
 
-  if N > ItemCount then
-    N := ItemCount;
+  WordSlots := MaxVocab - SPECIAL_TOKEN_COUNT;
+  AllItems := CollectAllEntries;
+  SetLength(TopItems, WordSlots);
+  TopKSelect(AllItems, Length(AllItems), WordSlots, TopItems, TopCount);
+  VocabSize := SPECIAL_TOKEN_COUNT + TopCount;
 
-  Writeln('--- En sik ', N, ' token ---');
-  for I := 0 to N - 1 do
-  begin
-    SetLength(S, Items[I].KeyLen);
-    if Items[I].KeyLen > 0 then
-      Move((FArena + Items[I].KeyOff)^, S[1], Items[I].KeyLen);
-    Writeln(I + 1, #9, S, #9, Items[I].Count);
+  Assign(F, Path);
+  SetTextBuf(F, Buf, SizeOf(Buf));
+  Rewrite(F);
+  try
+    WriteLn(F, '{');
+    WriteLn(F, '  "version": "1.0",');
+    WriteLn(F, '  "truncation": null,');
+    WriteLn(F, '  "padding": null,');
+    WriteLn(F, '  "added_tokens": [');
+
+    for I := 0 to SPECIAL_TOKEN_COUNT - 1 do
+    begin
+      WriteLn(F, '    {');
+      WriteLn(F, '      "id": ', I, ',');
+      Write(F, '      "content": "');
+      Write(F, SpecialTokenText(I));
+      WriteLn(F, '",');
+      WriteLn(F, '      "single_word": false,');
+      WriteLn(F, '      "lstrip": false,');
+      WriteLn(F, '      "rstrip": false,');
+      WriteLn(F, '      "normalized": false,');
+      Write(F, '      "special": true');
+      if I + 1 < SPECIAL_TOKEN_COUNT then
+        WriteLn(F, '    },')
+      else
+        WriteLn(F, '    }');
+    end;
+
+    WriteLn(F, '  ],');
+    WriteLn(F, '  "normalizer": {');
+    WriteLn(F, '    "type": "Sequence",');
+    WriteLn(F, '    "normalizers": [');
+    WriteLn(F, '      {');
+    WriteLn(F, '        "type": "NFKC"');
+    WriteLn(F, '      }');
+    WriteLn(F, '    ]');
+    WriteLn(F, '  },');
+    WriteLn(F, '  "pre_tokenizer": {');
+    WriteLn(F, '    "type": "Whitespace"');
+    WriteLn(F, '  },');
+    WriteLn(F, '  "post_processor": null,');
+    WriteLn(F, '  "decoder": null,');
+    WriteLn(F, '  "model": {');
+    WriteLn(F, '    "type": "BPE",');
+    WriteLn(F, '    "dropout": null,');
+    WriteLn(F, '    "unk_token": "[UNK]",');
+    WriteLn(F, '    "continuing_subword_prefix": null,');
+    WriteLn(F, '    "end_of_word_suffix": null,');
+    WriteLn(F, '    "fuse_unk": false,');
+    WriteLn(F, '    "byte_fallback": false,');
+    WriteLn(F, '    "ignore_merges": false,');
+    WriteLn(F, '    "vocab": {');
+
+    for I := 0 to SPECIAL_TOKEN_COUNT - 1 do
+    begin
+      Write(F, '      "');
+      Write(F, SpecialTokenText(I));
+      Write(F, '": ', I);
+      WriteLn(F, ',');
+    end;
+
+    for I := 0 to TopCount - 1 do
+    begin
+      TokenId := SPECIAL_TOKEN_COUNT + I;
+      Write(F, '      "');
+      JsonEscapeAndWrite(FArena + TopItems[I].KeyOff, TopItems[I].KeyLen, F);
+      Write(F, '": ', TokenId);
+      if I + 1 < TopCount then
+        WriteLn(F, ',')
+      else
+        WriteLn(F);
+    end;
+
+    WriteLn(F, '    },');
+    WriteLn(F, '    "merges": [');
+    WriteLn(F, '    ]');
+    WriteLn(F, '  }');
+    WriteLn(F, '}');
+    Result := VocabSize;
+  finally
+    CloseFile(F);
   end;
 end;
 
@@ -290,6 +509,8 @@ begin
   Writeln('  --pattern <glob>        Varsayilan: *.txt');
   Writeln('  --max-threads <N>       Varsayilan: CPU cekirdek sayisi (', GetCPUCount, ')');
   Writeln('  --max-print <N>         En sik N token (0=kapali)');
+  Writeln('  --maksimum-token <N>    JSON vocab boyutu (varsayilan: ', DEFAULT_MAKSIMUM_TOKEN, ')');
+  Writeln('  --output-dir <dizin>    kendi_tokenizerim.json cikti dizini (varsayilan: .)');
   Writeln('  --help                  Bu mesaj');
 end;
 
@@ -299,8 +520,10 @@ var
 begin
   DataDir := './all_txt/';
   FilePattern := '*.txt';
+  OutputDir := './';
   MaxThreads := GetCPUCount;
   MaxPrint := 0;
+  MaksimumToken := DEFAULT_MAKSIMUM_TOKEN;
 
   I := 1;
   while I <= ParamCount do
@@ -337,6 +560,22 @@ begin
       if I > ParamCount then
         raise Exception.Create('--max-print degeri gerekli');
       MaxPrint := StrToIntDef(ParamStr(I), 0);
+    end
+    else if ParamStr(I) = '--maksimum-token' then
+    begin
+      Inc(I);
+      if I > ParamCount then
+        raise Exception.Create('--maksimum-token degeri gerekli');
+      MaksimumToken := StrToIntDef(ParamStr(I), DEFAULT_MAKSIMUM_TOKEN);
+      if MaksimumToken <= SPECIAL_TOKEN_COUNT then
+        raise Exception.Create('--maksimum-token ozel tokenlardan buyuk olmali');
+    end
+    else if ParamStr(I) = '--output-dir' then
+    begin
+      Inc(I);
+      if I > ParamCount then
+        raise Exception.Create('--output-dir degeri gerekli');
+      OutputDir := IncludeTrailingPathDelimiter(ParamStr(I));
     end
     else
       raise Exception.Create('Bilinmeyen arguman: ' + ParamStr(I));
@@ -510,6 +749,8 @@ var
   Sr: TSearchRec;
   Er: Integer;
   T0, T1: QWord;
+  OutPath: string;
+  SavedVocab: Integer;
 begin
   InitCriticalSection(FreqLock);
   GlobalFreq.Init;
@@ -517,9 +758,11 @@ begin
     Arguman_Oku;
 
     Writeln('tokenizer başladı...');
-    Writeln('  input-dir   : ', DataDir);
-    Writeln('  pattern     : ', FilePattern);
-    Writeln('  max-threads : ', MaxThreads);
+    Writeln('  input-dir      : ', DataDir);
+    Writeln('  pattern        : ', FilePattern);
+    Writeln('  max-threads    : ', MaxThreads);
+    Writeln('  maksimum-token : ', MaksimumToken);
+    Writeln('  output-dir     : ', OutputDir);
 
     T0 := GetTickCount64;
     Er := FindFirst(DataDir + FilePattern, faAnyFile, Sr);
@@ -536,10 +779,15 @@ begin
       Sleep(1);
     T1 := GetTickCount64;
 
+    OutPath := OutputDir + 'kendi_tokenizerim.json';
+    SavedVocab := GlobalFreq.SaveTokenizerJson(OutPath, MaksimumToken);
+
     Writeln;
     Writeln('=== Ozet ===');
     Writeln('  Token sayisi     : ', GlobalFreq.TotalTokens);
     Writeln('  Benzersiz token  : ', GlobalFreq.UniqueCount);
+    Writeln('  JSON vocab       : ', SavedVocab);
+    Writeln('  JSON dosya       : ', OutPath);
     Writeln('  Sure (sn)        : ', (T1 - T0) / 1000.0:0:2);
     if MaxPrint > 0 then
       GlobalFreq.PrintTop(MaxPrint);
