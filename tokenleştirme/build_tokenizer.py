@@ -18,6 +18,10 @@ Usage example:
   python build_tokenizer.py --vocab-size 131072 --min-frequency 25 --lowercase \
     --input-dir "/mnt/disc2/all_txt" --max-bytes 50000000000 --shuffle-files
 
+  # pascal compare performans testi -- 14sn
+  python build_tokenizer.py --vocab-size 131072 --min-frequency 5 --lowercase --input-dir "/Users/arifkula/Repos/arifllm/tokenleştirme/pascal/bin/all_txt" --output-dir "." --log-file "./tokenizer_training.log"
+
+
 notlar
 * 300 Gb txt veri için çalıştığında 65335 vocab_size için 90GB bellek kullanımı oluştu
 * train_from_iterator 300GB veride 110GB+ RSS ile OOM'a gider; varsayılan mod tokenizer.train(files) kullanır

@@ -1,5 +1,5 @@
 # file_count=3
-# total_bytes=281541675
-./pascal/bin/all_txt/dosya1.txt
-./pascal/bin/all_txt/ibnKesirTefsiri_djvu.txt
-./pascal/bin/all_txt/c4-tr.tfrecord-00000-of-01024.json.txt
+# total_bytes=281542055
+/Users/arifkula/Repos/arifllm/tokenleştirme/pascal/bin/all_txt/dosya1.txt
+/Users/arifkula/Repos/arifllm/tokenleştirme/pascal/bin/all_txt/ibnKesirTefsiri_djvu.txt
+/Users/arifkula/Repos/arifllm/tokenleştirme/pascal/bin/all_txt/c4-tr.tfrecord-00000-of-01024.json.txt
